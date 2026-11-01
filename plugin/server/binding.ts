@@ -25,7 +25,10 @@ export interface Binding {
   sessionRef: AgentSessionRef | null;
   cwd: string;
   submittedMessages: Record<string, string>;
-  occupant?: { pid: number; tty: string | null; instanceId: string };
+  /** `shell`: the occupant is the bound shell itself (pid = shell pid), established under `allowShell`. */
+  occupant?: { pid: number; tty: string | null; instanceId: string; shell?: true };
+  /** Opt-in: prompt text may run as shell commands in a plain shell pane. Absent = false (shells are refused). */
+  allowShell?: boolean;
   /** Optional, newest last, at most {@link MAX_DECISIONS}. */
   decisions?: StoredDecision[];
 }
@@ -35,7 +38,7 @@ export function sessionRefOf(agent: AgentInfo): AgentSessionRef | null {
   return agent.agent_session ? { kind: agent.agent_session.kind, value: agent.agent_session.value } : null;
 }
 
-export function bindingOf(agent: AgentInfo, adapter: HarnessAdapter, herdrSession: string | null): Binding {
+export function bindingOf(agent: AgentInfo, adapter: HarnessAdapter, herdrSession: string | null, options: { allowShell?: boolean } = {}): Binding {
   return {
     harness: adapter.id,
     herdrSession,
@@ -44,6 +47,7 @@ export function bindingOf(agent: AgentInfo, adapter: HarnessAdapter, herdrSessio
     sessionRef: sessionRefOf(agent),
     cwd: agent.cwd ?? agent.foreground_cwd ?? "",
     submittedMessages: {},
+    ...(options.allowShell ? { allowShell: true } : {}),
   };
 }
 
@@ -68,6 +72,7 @@ export function persistenceOf(binding: Binding): ProviderPersistence {
       cwd: binding.cwd,
       submittedMessages: capSubmittedMessages(binding.submittedMessages),
       ...(binding.occupant ? { occupant: binding.occupant } : {}),
+      ...(binding.allowShell ? { allowShell: true } : {}),
       ...(binding.decisions?.length ? { decisions: binding.decisions.slice(-MAX_DECISIONS) as unknown as ProviderPersistence["data"] } : {}),
     },
   };
@@ -83,7 +88,8 @@ export function parseBinding(persistence: ProviderPersistence, adapter: HarnessA
     cwd: z.string(),
     sessionRef: z.object({ kind: z.enum(["path", "id"]), value: z.string().min(1) }).nullable(),
     submittedMessages: z.record(z.string(), z.string()).default({}),
-    occupant: z.object({ pid: z.number().int().positive(), tty: z.string().nullable(), instanceId: z.string().min(1) }).optional(),
+    occupant: z.object({ pid: z.number().int().positive(), tty: z.string().nullable(), instanceId: z.string().min(1), shell: z.literal(true).optional() }).optional(),
+    allowShell: z.boolean().optional(),
     // Rows are cosmetic: a malformed entry is dropped rather than failing the whole binding.
     decisions: z.array(z.unknown()).optional(),
   }).parse(persistence.data);
@@ -97,6 +103,7 @@ export function parseBinding(persistence: ProviderPersistence, adapter: HarnessA
     cwd: parsed.cwd,
     submittedMessages: capSubmittedMessages(parsed.submittedMessages),
     ...(parsed.occupant ? { occupant: parsed.occupant } : {}),
+    ...(parsed.allowShell ? { allowShell: true } : {}),
     ...(parsed.decisions ? { decisions: storedDecisionsOf(parsed.decisions) } : {}),
   };
 }

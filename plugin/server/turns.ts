@@ -46,6 +46,8 @@ export interface TurnTrackerThresholds {
   idleSettleMs: number;
   /** Status evidence: `idle`/`done` held this long with no observed activity ends the turn (with an info notice). */
   noActivitySettleMs: number;
+  /** Process evidence: the shell idle this long with no child ever seen in the foreground ends the turn (a command that finished between polls). */
+  processNoActivitySettleMs: number;
   /**
    * Early-abort detection (a Stop that lands before the harness recorded the prompt): only observations at least this
    * long after the interrupt count. Normal startup lag (R17) keeps Herdr on `idle` for seconds, but there the user
@@ -63,6 +65,7 @@ export const DEFAULT_TURN_THRESHOLDS: TurnTrackerThresholds = {
   uncertainSettleMs: 15_000,
   idleSettleMs: 3_000,
   noActivitySettleMs: 15_000,
+  processNoActivitySettleMs: 1_500,
   earlyAbortMinAfterInterruptMs: 1_000,
   earlyAbortSettleMs: 1_000,
 };
@@ -146,6 +149,24 @@ export class TurnTracker {
     if (!this.modePinned) this.mode = mode;
   }
 
+  /**
+   * Switch the evidence mode of a tracker with no turn in flight. The session uses it to move a binding between
+   * Herdr status evidence and shell process evidence; an open turn keeps the mode it began under.
+   */
+  setEvidenceMode(mode: TurnEvidence): void {
+    if (this.phase.kind === "idle") this.mode = mode;
+  }
+
+  /** Both "status" and "process" are fed by `observeStatusEvidence`; only their settle rules differ. */
+  private get statusLike(): boolean { return this.mode !== "transcript"; }
+
+  /** How long `idle`/`done` must hold to end a turn that has seen activity (`active`) or none (`quiet`). Process evidence is exact, so activity ends at once. */
+  private get settleWindows(): { active: number; quiet: number } {
+    return this.mode === "process"
+      ? { active: 0, quiet: this.thresholds.processNoActivitySettleMs }
+      : { active: this.thresholds.idleSettleMs, quiet: this.thresholds.noActivitySettleMs };
+  }
+
   get activeTurn(): string | null {
     return this.phase.kind === "idle" ? null :
       this.phase.kind === "pending" ? this.phase.turnId : this.phase.turnId;
@@ -183,7 +204,7 @@ export class TurnTracker {
    * clock is a different rule and is left alone.
    */
   private restartUnknownClock(): void {
-    if (this.mode === "status") this.unknownSince = null;
+    if (this.statusLike) this.unknownSince = null;
   }
 
   /** `agent.prompt` was accepted; the pending submission becomes an active Paseo turn. */
@@ -191,7 +212,7 @@ export class TurnTracker {
     if (this.phase.kind !== "pending") return;
     const { turnId, clientMessageId, responseReported, baseline } = this.phase;
     // Without an admission baseline (status mode), the last observed counters are the least-baseline that is still truthful.
-    const start = baseline ?? (this.mode === "status" ? { stateChangeSeq: this.lastSeq, completionSeq: this.lastCompletion } : null);
+    const start = baseline ?? (this.statusLike ? { stateChangeSeq: this.lastSeq, completionSeq: this.lastCompletion } : null);
     this.idleSince = null;
     this.restartUnknownClock();
     this.phase = { kind: "active", turnId, origin: "paseo", since: this.now(),
@@ -346,7 +367,7 @@ export class TurnTracker {
    * turn still fails once `unknown` has lasted `unknownBindingLossMs`.
    */
   observeStatusEvidence(evidence: StatusEvidence): void {
-    if (this.mode !== "status") return;
+    if (!this.statusLike) return;
     const now = this.now();
     this.lastStatus = evidence.status;
     const seqAdvanced = evidence.stateChangeSeq > this.lastSeq;
@@ -440,15 +461,16 @@ export class TurnTracker {
     const sawActivity = activitySeen || evidence.stateChangeSeq > startSeq;
     const idleHeld = now - this.idleSince;
     const viaCompletion = completionAdvanced;
-    const viaIdle = sawActivity && idleHeld >= this.thresholds.idleSettleMs;
-    const viaNoActivity = !sawActivity && idleHeld >= this.thresholds.noActivitySettleMs;
+    const windows = this.settleWindows;
+    const viaIdle = sawActivity && idleHeld >= windows.active;
+    const viaNoActivity = !sawActivity && idleHeld >= windows.quiet;
     if (!viaCompletion && !viaIdle && !viaNoActivity) return;
     // A pending interrupt means the turn was stopped (the status counters cannot tell a stop from a natural end).
     const state = this.interruptedAt !== null ? "canceled" : "completed";
     this.phase = { kind: "idle" };
     this.clearInterrupt();
     this.emit({ type: "turn", turnId, state });
-    if (viaNoActivity && state === "completed") {
+    if (viaNoActivity && state === "completed" && this.mode !== "process") {
       // Nothing but idle was ever observed: the "turn" may only be slow to start, so the heuristic is labelled.
       this.emit({
         type: "notice",
@@ -587,11 +609,11 @@ export class TurnTracker {
     const consider = (candidate: number) => { if (deadline === null || candidate < deadline) deadline = candidate; };
     if (this.phase.kind === "active" && this.idleSince !== null) {
       const active = this.phase.activitySeen || this.lastSeq > this.phase.startSeq;
-      consider(this.idleSince + (active ? this.thresholds.idleSettleMs : this.thresholds.noActivitySettleMs));
+      consider(this.idleSince + (active ? this.settleWindows.active : this.settleWindows.quiet));
     } else if (this.phase.kind === "pending" && this.phase.responseReported && this.phase.uncertainIdleSince !== null) {
       consider(this.phase.uncertainIdleSince + this.thresholds.uncertainSettleMs);
     }
-    if (this.mode === "status" && this.unknownSince !== null && this.turnAwaitsEvidence) {
+    if (this.statusLike && this.unknownSince !== null && this.turnAwaitsEvidence) {
       consider(this.unknownSince + this.thresholds.unknownBindingLossMs);
     }
     if (this.interruptedAt !== null && !this.interruptNoticed) consider(this.interruptedAt + this.thresholds.interruptPendingMs);

@@ -163,9 +163,19 @@ The plugin reads the environment of the Paseo daemon, not of your shell. Set `HE
 
 A chat remembers the Herdr session it was created on. After you change settings to another session, new operations use the new target, but reopening a chat that belongs to the old session fails with "This conversation belongs to Herdr session …, but the Herdr plugin now targets …". Change the settings back to reopen it. Open chats are never moved to another Herdr.
 
+## Shell input (opt-in, off by default)
+
+By default a plain shell pane is refused. A conversation can be opted into **shell input**, which makes what you type in Paseo run as commands in that shell. Treat it like giving the chat a terminal.
+
+- **Turn it on at bind time** by passing `allowShell: true` in the `herdrBind` provider option together with the shell pane's `terminalId`. Herdr must list the pane without a detected agent, and the shell must be at an idle prompt when the chat opens. A pane where Herdr detects an agent is refused.
+- **Turn it on or off later** with the management RPC `herdr.chat.allow-shell` with `{ "agentId": "<Paseo agent id>", "enabled": true | false }`. It reaches only a conversation that is open in the plugin. Turning it off is a kill switch: the conversation goes read-only and nothing more is typed. Turning it on is refused for a conversation bound to an agent; a read-only conversation keeps the flag for when it is reopened. The setting is saved with the chat. The Herdr screen has no control for it: there is no per-row action slot for a pane that Herdr does not list as an agent, so this is RPC only.
+- **What happens.** The notice "Prompt text runs as shell commands." shows when the chat opens and with every prompt. A prompt must be one line of plain text (no newline or control character); it is typed and Enter is pressed. It is accepted only while the shell itself is at its prompt; while a command runs, prompts are refused and **Stop** sends Ctrl+C. The turn ends when the shell has its prompt back. If Paseo cannot tell whether a line reached the shell, it says so and never sends it again.
+- **Safety checks.** Before each prompt Paseo re-checks the pane, the shell's process and its start time. If the shell exits, is replaced, or runs another program in place (`exec`), the conversation goes read-only. If Paseo cannot read the pane's processes it refuses new prompts without ending a running turn.
+- **Limits.** Typing in the terminal at the same moment can interleave with a prompt; Paseo cannot see keystrokes you type yourself. The shell is recognised by name (bash, zsh, fish, sh and similar) and Herdr's own shell pid, and a shell started inside another program is not treated as the pane's shell. Shell panes are not listed in the Herdr screen or Paseo's import list.
+
 ## Known limits
 
 - Replies appear a message at a time, not token by token.
-- Only agents Herdr lists as agents are supported. OMP has full support; any other detected agent opens as a "Generic" chat: you see the pane's screen as one updating message, prompts you send appear above it, and approvals, model changes, restart and forks are not available. Plain shell panes don't appear and are refused.
+- Only agents Herdr lists as agents are supported. OMP has full support; any other detected agent opens as a "Generic" chat: you see the pane's screen as one updating message, prompts you send appear above it, and approvals, model changes, restart and forks are not available. Plain shell panes don't appear and are refused unless you opt a conversation into shell input (next section).
 - Only plain-text messages can be sent from Paseo.
 - If an agent disappears from Herdr, its chat goes read-only; a new chat is needed for any agent that replaces it.

@@ -22,3 +22,14 @@ export class BoundSessions {
     return flushed;
   }
 }
+
+/** Every open session, so a management RPC can reach a live conversation by its Paseo agent id (`herdr.chat.allow-shell`). */
+export class OpenSessions {
+  private readonly sessions = new Set<HerdrHarnessSession>();
+  add(session: HerdrHarnessSession): void { this.sessions.add(session); }
+  delete(session: HerdrHarnessSession): void { this.sessions.delete(session); }
+  /** The open, not yet closed sessions of Paseo agent `agentId` (a reopened chat may briefly have two). */
+  byAgentId(agentId: string): HerdrHarnessSession[] {
+    return [...this.sessions].filter((session) => !session.isAborted && session.paseoAgentId === agentId);
+  }
+}

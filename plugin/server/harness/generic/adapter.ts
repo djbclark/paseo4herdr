@@ -1,6 +1,8 @@
-import type { HarnessAdapter, PromptDelivery, TranscriptLocator, TranscriptReader } from "../types.js";
-import type { PaneProcessInfo } from "../../herdr/schema.js";
+import type { HarnessAdapter, PromptDelivery, ShellSupport, TranscriptLocator, TranscriptReader } from "../types.js";
+import { PaneProcessInfoResultSchema, type PaneProcessInfo } from "../../herdr/schema.js";
+import { HerdrError } from "../../herdr/client.js";
 import { classifyHerdrPrompt } from "../../prompt.js";
+import { shellForeground, shellTextProblem } from "../../shell.js";
 import { processInstanceId } from "../process-identity.js";
 import { openScreenReader, recordSubmittedPrompt } from "./screen.js";
 
@@ -22,6 +24,45 @@ const programName = (value: string | null | undefined): string => (value ?? "").
 export const isShellProcess = (process: { name: string; argv0?: string | null }): boolean =>
   Object.hasOwn(SHELLS, programName(process.name)) || Object.hasOwn(SHELLS, programName(process.argv0));
 
+/** Errors Herdr raises before it writes anything to the pane. */
+const BEFORE_WRITE: Record<string, true> = { pane_not_found: true, invalid_params: true };
+
+/**
+ * Shell opt-in (a binding's `allowShell`): one prompt is one command line, typed with `pane.send_text` and submitted with
+ * an Enter key. `agent.prompt` refuses a pane with no detected agent, so it is not used. Only a shell that is idle at its
+ * prompt (foreground group is the shell itself) is typed into, re-checked right before the write.
+ */
+const shellSupport: ShellSupport = {
+  isShell: isShellProcess,
+  interruptKeys: ["ctrl+c"],
+  notice: "Prompt text runs as shell commands.",
+  submit: async (target, text, { signal, request }): Promise<PromptDelivery> => {
+    const problem = shellTextProblem(text);
+    if (problem) return { type: "rejected", message: problem };
+    try {
+      const process = PaneProcessInfoResultSchema.parse(await request("pane.process_info", { pane_id: target.paneId }, { signal })).process_info;
+      if (process.shell_pid !== target.pid || shellForeground(shellSupport, process) !== "idle") {
+        return { type: "rejected", message: "The shell is not at an idle prompt; nothing was typed." };
+      }
+    } catch {
+      return { type: "rejected", message: "Paseo could not check that the shell is at an idle prompt; nothing was typed." };
+    }
+    try {
+      await request("pane.send_text", { pane_id: target.paneId, text }, { signal });
+    } catch (error) {
+      if (error instanceof HerdrError && Object.hasOwn(BEFORE_WRITE, error.code)) return { type: "rejected", message: error.message };
+      return { type: "uncertain", message: `Typing the command may have partly reached the shell (${error instanceof Error ? error.message : String(error)})` };
+    }
+    try {
+      await request("pane.send_keys", { pane_id: target.paneId, keys: ["enter"] }, { signal });
+    } catch (error) {
+      // The text is at the prompt and Enter may or may not have been pressed: never type or press it again.
+      return { type: "uncertain", message: `The command was typed but Enter may not have been pressed (${error instanceof Error ? error.message : String(error)})` };
+    }
+    return { type: "accepted" };
+  },
+};
+
 export const genericAdapter: HarnessAdapter = {
   id: "generic",
   label: "Generic",
@@ -29,6 +70,7 @@ export const genericAdapter: HarnessAdapter = {
   herdrIntegration: null,
   binding: "pane",
   turnEvidence: "status",
+  shell: shellSupport,
   // No `launch`, `resumeArgs`, `readConfig`, `configure`, approvals or forks: import/bind only.
   /** Pane-bound: the locator needs the live pane. Without one the pane can't be read and the chat opens read-only. */
   resolveTranscript: async (_ref, ctx) => ctx.pane

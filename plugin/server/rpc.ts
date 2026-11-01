@@ -5,13 +5,13 @@ import type { PluginHandlerContext, PluginServerContext } from "@getpaseo/plugin
 
 // Derived from the SDK: Paseo's compiler can't resolve @getpaseo/client in an install without node_modules.
 type PaseoApi = PluginHandlerContext["paseo"];
-import { herdrAgentRestartRpc, herdrChatReadyRpc, herdrDiagnosticsRpc, herdrDuplicatesArchiveRpc, herdrFoldersSuggestRpc, herdrOverviewRpc, herdrTargetRpc, herdrWorkspaceCreateRpc, type CompanionStatus, type HerdrTarget, type FolderSuggestion, type OverviewAgent, type OverviewTab, type OverviewWorkspace } from "../shared/rpc.js";
+import { herdrAgentRestartRpc, herdrChatAllowShellRpc, herdrChatReadyRpc, herdrDiagnosticsRpc, herdrDuplicatesArchiveRpc, herdrFoldersSuggestRpc, herdrOverviewRpc, herdrTargetRpc, herdrWorkspaceCreateRpc, type CompanionStatus, type HerdrTarget, type FolderSuggestion, type OverviewAgent, type OverviewTab, type OverviewWorkspace } from "../shared/rpc.js";
 import { parseBinding, sameRef, sessionRefOf, type Binding } from "./binding.js";
 import { expandHome, suggestFolders } from "./folders.js";
 import { restartAgent } from "./restart.js";
 import { buildDiagnostics, type DiagnosticsInput } from "./diagnostics.js";
 import { PLUGIN_VERSION } from "./plugin-version.js";
-import type { BoundSessions } from "./bound-sessions.js";
+import type { BoundSessions, OpenSessions } from "./bound-sessions.js";
 import { attachArgs, attachCommand } from "./herdr-commands.js";
 import { resolveSocketPath } from "./herdr/socket-path.js";
 import { HerdrClient } from "./herdr/client.js";
@@ -43,6 +43,8 @@ export interface ManagementDeps {
   restart?: typeof restartAgent;
   /** Bound chats awaiting `herdr.chat.ready`. */
   boundSessions?: BoundSessions;
+  /** Open conversations by Paseo agent id (`herdr.chat.allow-shell`). */
+  openSessions?: OpenSessions;
   /** Environment the CLI would resolve its socket with; defaults to `process.env`. */
   env?: Readonly<Record<string, string | undefined>>;
   /** Reads the OMP input companion's install state. Required so tests inject a fake and never read the real home. */
@@ -469,6 +471,14 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
   server.handle(herdrChatReadyRpc, async ({ terminalId }) => {
     const { target } = await deps.readTarget();
     return { flushed: deps.boundSessions?.flushHistory(target.herdrSession, terminalId) ?? 0 };
+  });
+
+  server.handle(herdrChatAllowShellRpc, async ({ agentId, enabled }) => {
+    const sessions = deps.openSessions?.byAgentId(agentId) ?? [];
+    if (sessions.length === 0) throw new Error("This conversation is not open in the Herdr plugin; open it in Paseo first.");
+    let applied = false;
+    for (const session of sessions) applied = session.setAllowShell(enabled).applied || applied;
+    return { enabled, applied };
   });
 
   server.handle(herdrWorkspaceCreateRpc, async ({ cwd, label }) => {

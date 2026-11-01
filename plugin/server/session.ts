@@ -1,7 +1,8 @@
 import type { ProviderConfigChanges, ProviderEvent, ProviderPrompt, ProviderSessionConfig } from "@getpaseo/plugin/server/provider";
 import type { HarnessAdapter, PaneObservation, RestoredPromptOutcome, TranscriptReader, TranscriptSnapshot } from "./harness/types.js";
 import { adapterAcceptsKind } from "./harness/resolve.js";
-import { PaneProcessInfoResultSchema, type AgentInfo, type AgentStatus, type PaneProcessInfo } from "./herdr/schema.js";
+import { PaneProcessInfoResultSchema, type AgentInfo, type AgentStatus, type PaneProcessInfo, type PaneProcessInfoResult } from "./herdr/schema.js";
+import { shellForeground } from "./shell.js";
 import type { HerdrSubscription, SubscriptionDescriptor } from "./herdr/client.js";
 import { persistenceOf, sameRef, sessionRefOf, type Binding } from "./binding.js";
 import { emptyTimelineState, seedTimeline, type TimelineRow } from "./timeline.js";
@@ -19,7 +20,8 @@ export interface HerdrRequest {
 }
 export interface SessionDeps {
   adapter: HarnessAdapter;
-  listAgents(signal?: AbortSignal): Promise<AgentInfo[]>;
+  /** `includeShells` also lists plain shell panes; only a binding that opted into shell input asks for it. */
+  listAgents(signal?: AbortSignal, options?: { includeShells?: boolean }): Promise<AgentInfo[]>;
   request: HerdrRequest;
   subscribe(subscriptions: SubscriptionDescriptor[], options?: { signal?: AbortSignal }): Promise<HerdrSubscription>;
   emit(event: ProviderEvent): void;
@@ -112,6 +114,14 @@ export class HerdrHarnessSession {
   private validationSeq = 0;
   private committedSeq = 0;
   private committed: AgentInfo | null = null;
+  /** Paseo's id for this agent (from the provider env at open); lets management RPCs reach the live session. */
+  paseoAgentId: string | null = null;
+  /**
+   * A shell binding has no Herdr agent status: its status and counters are derived from the foreground process.
+   * `seq` moves on every working/idle change and `completion` on every return to the shell, so the turn tracker reads
+   * them like Herdr's own counters.
+   */
+  private shellTrack: { status: "idle" | "working" | null; seq: number; completion: number } = { status: null, seq: 0, completion: 0 };
   /** Live view of this session's pane for pane-bound adapters; it follows terminal and pane moves. */
   readonly observation: PaneObservation;
 
@@ -120,7 +130,7 @@ export class HerdrHarnessSession {
       binding, paneId: null, process: null, reader: null, timeline: emptyTimelineState(), snapshot: null,
       outcome: "active", connected: false, status: "unknown", generation: 0, admitting: false,
       pending: null, turnBaselineEndId: null, workingSeen: false, staleWorking: null,
-      tracker: new TurnTracker({ mode: deps.adapter.turnEvidence, onEffect: (effect) => this.applyEffect(effect) }),
+      tracker: new TurnTracker({ mode: binding.allowShell && binding.occupant?.shell ? "process" : deps.adapter.turnEvidence, onEffect: (effect) => this.applyEffect(effect) }),
     };
     const state = this.state;
     this.observation = {
@@ -206,6 +216,7 @@ export class HerdrHarnessSession {
   async open(config: ProviderSessionConfig, history: "replay" | "skip" | "replay-live", requestId?: string): Promise<void> {
     let live: TimelineRow[] = [];
     this.approvals.begin(config);
+    this.paseoAgentId = config.env?.PASEO_AGENT_ID || null;
     const paneBound = this.adapter.binding === "pane";
     if (paneBound) {
       // A pane reader needs the validated pane, so validate first. Its events (a freeze notice, persistence) must
@@ -261,6 +272,7 @@ export class HerdrHarnessSession {
       if (this.isAborted) return;
     }
     this.emit({ type: "session.ready", requestId, sessionId: this.sessionId });
+    if (this.state.binding.allowShell && this.adapter.shell) this.shellNotice("shell-enabled", "Shell input is on");
     if (this.state.outcome === "active") {
       this.state.connected = true;
       // Before the live loop: it must know whether approvals are on when it first sees a blocked agent.
@@ -347,10 +359,46 @@ export class HerdrHarnessSession {
     this.state.tracker.close();
   }
 
+  /** Raise the shell notice: text typed in this conversation runs as commands. */
+  private shellNotice(id: string, title: string): void {
+    const shell = this.adapter.shell;
+    if (!shell) return;
+    this.emit({ type: "session.notice", sessionId: this.sessionId, notice: { id, severity: "warning", title, description: shell.notice } });
+  }
+
+  /** The notice shown with every prompt delivered to a shell. */
+  shellPromptNotice(): void { this.shellNotice("shell-prompt", "Prompt text runs as shell commands."); }
+
+  /**
+   * Turn shell input on or off for this binding and persist it. Off: the next validation freezes a conversation bound to a
+   * shell (as without the flag). On: allowed unless the pane is bound to an agent; a read-only conversation keeps the flag
+   * for when it is reopened. Returns whether the change acts on this live conversation now.
+   */
+  setAllowShell(enabled: boolean): { applied: boolean } {
+    const binding = this.state.binding;
+    if (enabled && !this.adapter.shell) throw new Error(`${this.adapter.label} conversations cannot take shell input`);
+    if (enabled && this.state.outcome === "active" && binding.occupant && !binding.occupant.shell) {
+      throw new Error("This conversation is bound to an agent, not a plain shell; shell input cannot be turned on for it");
+    }
+    if ((binding.allowShell === true) === enabled) return { applied: this.state.outcome === "active" };
+    if (enabled) binding.allowShell = true; else delete binding.allowShell;
+    this.persist();
+    if (this.state.outcome !== "active") return { applied: false };
+    if (enabled) this.shellNotice("shell-enabled", "Shell input is on");
+    void this.live.reconcile();
+    return { applied: true };
+  }
+
   /** Refresh terminal, native session, foreground leader and process-local nonce. */
   async validateAgent(moveRetry = false, seq = ++this.validationSeq): Promise<AgentInfo | null> {
     const generation = this.state.generation;
-    const agents = await this.deps.listAgents(this.signal);
+    // Only a binding that opted in lists plain shell panes; everything else sees `agent.list` exactly as it always did.
+    const shell = this.state.binding.allowShell && this.adapter.shell ? this.adapter.shell : null;
+    if (this.state.binding.occupant?.shell && !shell) {
+      this.freeze("The bound agent was replaced", "Shell input is turned off for this conversation; no input will be sent to the shell.");
+      return null;
+    }
+    const agents = await (shell ? this.deps.listAgents(this.signal, { includeShells: true }) : this.deps.listAgents(this.signal));
     if (!this.current(generation) || this.state.outcome !== "active") return null;
     const binding = this.state.binding;
     let agent = agents.find((candidate) => candidate.terminal_id === binding.terminalId);
@@ -382,7 +430,14 @@ export class HerdrHarnessSession {
       this.freeze("History unavailable", "This agent has no readable native history; the conversation is read-only.");
       return null;
     }
-    const result = PaneProcessInfoResultSchema.parse(await this.deps.request("pane.process_info", { pane_id: agent.pane_id }, { signal: this.signal }));
+    let result: PaneProcessInfoResult;
+    try {
+      result = PaneProcessInfoResultSchema.parse(await this.deps.request("pane.process_info", { pane_id: agent.pane_id }, { signal: this.signal }));
+    } catch (error) {
+      // A shell binding reads a failed process lookup as "unknown": prompts are refused and no turn ends early.
+      if (shell && binding.occupant?.shell && !this.isAborted) return this.shellUnknown(agent);
+      throw error;
+    }
     if (!this.current(generation) || this.state.outcome !== "active") return null;
     const process = result.process_info;
     const pid = process.foreground_process_group_id;
@@ -396,6 +451,10 @@ export class HerdrHarnessSession {
       this.state.connected = false;
       this.state.tracker.observeConnectivityLost();
       return null;
+    }
+    // A shell binding (or a first validation that finds an idle shell under the flag) takes the shell path; anything else is the agent path.
+    if (shell && (binding.occupant?.shell || (!binding.occupant && shellForeground(shell, process) === "idle"))) {
+      return this.validateShell(agent, process, seq, generation);
     }
     if (!pid || !this.adapter.isOccupant(process)) {
       this.freeze("The bound agent was replaced", "The foreground process is not the bound harness; input is disabled.");
@@ -413,8 +472,65 @@ export class HerdrHarnessSession {
       this.freeze("The bound agent was replaced", "The process-local input identity changed; no input will be sent to the replacement.");
       return null;
     }
-    // A validation that started earlier but finished after a later one must not move the claim or state back. It
-    // returns what the later one committed (the session is still active here, so that commit did not freeze it).
+    return this.commitValidated(agent, process, { pid, tty: process.tty ?? null, instanceId: identity.instanceId }, seq);
+  }
+
+  /** A failed or unreadable process lookup for a shell binding: status `unknown`, nothing committed, nothing ended. */
+  private shellUnknown(agent: AgentInfo): AgentInfo {
+    this.state.status = "unknown";
+    return { ...agent, agent_status: "unknown" };
+  }
+
+  /**
+   * Validation of a shell binding. The occupant is the shell itself (pid = Herdr's `shell_pid`, start time from `ps`):
+   * the shell exiting, being replaced by another program or by another process freezes it. Idle = the shell owns the foreground;
+   * working = a child owns it. Anything unreadable is `unknown`, which rejects prompts and ends nothing.
+   */
+  private async validateShell(agent: AgentInfo, process: PaneProcessInfo, seq: number, generation: number): Promise<AgentInfo | null> {
+    const shell = this.adapter.shell!;
+    const binding = this.state.binding;
+    const previous = binding.occupant;
+    const shellPid = process.shell_pid ?? null;
+    const replaced = (description: string) => { this.freeze("The bound shell was replaced", description); return null; };
+    if (agent.agent) return replaced(`Herdr now detects ${agent.agent} in this pane, so it is no longer a plain shell; no input will be sent.`);
+    if (!shellPid) return replaced("The bound shell has exited; no input will be sent.");
+    if (previous && (previous.pid !== shellPid || previous.tty !== (process.tty ?? null))) {
+      return replaced("The pane's shell process changed; no input will be sent to the replacement.");
+    }
+    const foreground = shellForeground(shell, process);
+    if (foreground === "exec") return replaced("The shell's process now runs another program; no input will be sent to it.");
+    if (foreground === "unknown") return this.shellUnknown(agent);
+    let identity: { pid: number; instanceId: string };
+    try {
+      identity = await this.adapter.inspectInput({ pid: shellPid, ref: null,
+        pane: { paneId: agent.pane_id, terminalId: agent.terminal_id, process } }, this.signal);
+    } catch (error) {
+      // `ps` failing means the identity cannot be checked, never that the shell was replaced. Before the first commit it fails the open.
+      if (!previous) throw error;
+      return this.isAborted ? null : this.shellUnknown(agent);
+    }
+    if (!this.current(generation) || this.state.outcome !== "active") return null;
+    if (identity.pid !== shellPid || (previous && previous.instanceId !== identity.instanceId)) {
+      return replaced("The shell's start time changed, so it is a different process; no input will be sent to it.");
+    }
+    if (!previous) this.state.tracker.setEvidenceMode("process");
+    const track = this.shellTrack;
+    const status = foreground === "idle" ? "idle" : "working";
+    if (track.status !== status) {
+      if (track.status !== null) { track.seq++; if (status === "idle") track.completion++; }
+      track.status = status;
+    }
+    return this.commitValidated({ ...agent, agent_status: status, state_change_seq: track.seq, completion_seq: track.completion },
+      process, { pid: shellPid, tty: process.tty ?? null, instanceId: identity.instanceId, shell: true }, seq);
+  }
+
+  /**
+   * Commit a validated observation. A validation that started earlier but finished after a later one must not move the
+   * claim or state back: it returns what the later one committed (the session is still active here, so that commit did not freeze it).
+   */
+  private commitValidated(agent: AgentInfo, process: PaneProcessInfo, occupant: NonNullable<Binding["occupant"]>, seq: number): AgentInfo | null {
+    const binding = this.state.binding;
+    const previous = binding.occupant;
     if (seq < this.committedSeq) return this.committed;
     this.committedSeq = seq;
     if (this.deps.claimPane && !this.deps.claimPane(agent.terminal_id)) {
@@ -423,7 +539,7 @@ export class HerdrHarnessSession {
       return null;
     }
     const moved = binding.terminalId !== agent.terminal_id || this.state.paneId !== agent.pane_id;
-    binding.occupant = { pid, tty: process.tty ?? null, instanceId: identity.instanceId };
+    binding.occupant = occupant;
     binding.terminalId = agent.terminal_id;
     this.state.paneId = agent.pane_id;
     this.state.process = process;

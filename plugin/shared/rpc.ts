@@ -204,6 +204,18 @@ export const herdrChatReadyRpc = defineRpc({
 });
 
 /**
+ * Turn shell input on or off for an open conversation (`agentId` = its Paseo agent id). On makes prompt text run as shell
+ * commands in a plain shell pane; off is the kill switch (a conversation bound to a shell freezes). The flag is part of
+ * the chat's persistence, so it survives a reload. `applied` is false when the conversation is read-only: the flag is then
+ * kept for when it is reopened. Errors when the conversation is not open in this plugin or is bound to an agent.
+ */
+export const herdrChatAllowShellRpc = defineRpc({
+  name: "herdr.chat.allow-shell",
+  input: z.object({ agentId: z.string().min(1), enabled: z.boolean() }),
+  output: z.object({ enabled: z.boolean(), applied: z.boolean() }),
+});
+
+/**
  * Archive the duplicate chats the user was shown for one terminal, after the server re-reads the owner chat
  * (compare-and-archive): nothing is archived unless `ownerId` is still the terminal's owner, and only ids that are
  * still its live duplicates are. Never starts Herdr. Archived chats stay restorable from Paseo's archive.

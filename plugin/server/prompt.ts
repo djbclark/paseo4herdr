@@ -92,9 +92,15 @@ export class PromptController {
       state.tracker.reservePending({ turnId: randomUUID(), clientMessageId: prompt.clientMessageId,
         baseline: { stateChangeSeq: agent.state_change_seq, completionSeq: agent.completion_seq ?? null } });
       reserved = true;
-      const outcome = await session.adapter.submitPrompt({ pid: occupant.pid, ref, instanceId: occupant.instanceId,
+      const target = { pid: occupant.pid, ref, instanceId: occupant.instanceId,
         paneId: agent.pane_id, terminalId: agent.terminal_id,
-        pane: { paneId: agent.pane_id, terminalId: agent.terminal_id, process: processInfo } }, text, { signal: session.signal, request: session.deps.request });
+        pane: { paneId: agent.pane_id, terminalId: agent.terminal_id, process: processInfo } };
+      const ctx = { signal: session.signal, request: session.deps.request };
+      // A shell occupant is typed into as a command line; every other occupant goes through the adapter's own submit.
+      const shell = occupant.shell ? session.adapter.shell : undefined;
+      if (occupant.shell && !shell) throw new Error("This adapter cannot type into a shell");
+      const outcome = shell ? await shell.submit(target, text, ctx) : await session.adapter.submitPrompt(target, text, ctx);
+      if (shell && session.current(generation) && outcome.type !== "rejected") session.shellPromptNotice();
       if (!session.current(generation)) return;
       if (outcome.type === "rejected") {
         // A definite rejection starts no terminal turn here: the tracker cannot see the stale-`working` echo guard, so
@@ -144,7 +150,13 @@ export class PromptController {
         done();
         return;
       }
-      const keys = session.adapter.interruptKeysFor?.(agent.agent) ?? session.adapter.interruptKeys;
+      const shell = state.binding.occupant?.shell ? session.adapter.shell : undefined;
+      if (shell && agent.agent_status !== "working") {
+        // The shell is at its prompt (or unreadable): Ctrl+C would only edit the command line. Send nothing.
+        done();
+        return;
+      }
+      const keys = shell ? shell.interruptKeys : session.adapter.interruptKeysFor?.(agent.agent) ?? session.adapter.interruptKeys;
       if (!keys.length) {
         session.emit({ type: "session.notice", sessionId: session.sessionId, notice: {
           id: "interrupt-unavailable", severity: "warning", title: "Stop is not available for this agent",
