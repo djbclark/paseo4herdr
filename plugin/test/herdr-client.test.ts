@@ -69,6 +69,8 @@ async function socketServer(handle: FakeHandler) {
     sockets.add(socket);
     socket.once("close", () => sockets.delete(socket));
     socket.setEncoding("utf8");
+    // A client that closes first must not turn the reply write into an uncaught EPIPE.
+    socket.on("error", () => {});
     let buffer = "";
     socket.on("data", (chunk: string) => {
       buffer += chunk;
