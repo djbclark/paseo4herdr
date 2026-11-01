@@ -93,7 +93,7 @@ describe("generic screen reader", () => {
   it("puts the ledger's user rows, in send order, before the screen row, and counts ids past the cap", async () => {
     const { observation } = observationOf({ text: "screen" });
     const reader = openScreenReader(observation);
-    const send = (text: string) => genericAdapter.submitPrompt({ pid: 1, ref: null, instanceId: "i", paneId: "pane-1", terminalId: "t1" }, text,
+    const send = (text: string) => genericAdapter.submitPrompt({ pid: 1, ref: null, instanceId: "i", paneId: "pane-1", terminalId: "t1", agentKind: "grok" }, text,
       { signal: new AbortController().signal, request: observation.request });
     expect(await send("first")).toEqual({ type: "accepted" });
     expect(await send("second")).toEqual({ type: "accepted" });
@@ -152,7 +152,16 @@ describe("generic adapter", () => {
     }
     expect(genericAdapter.isOccupant(procOf("-zsh"))).toBe(false);
     expect(genericAdapter.isOccupant(procOf("3.1.0", "/bin/bash"))).toBe(false);
-    expect(isShellProcess({ name: "x", argv0: "-fish" })).toBe(true);
+    expect(isShellProcess({ name: "-fish" })).toBe(true);
+  });
+
+  it("accepts a prompt reply only for the agent kind seen at validation", async () => {
+    const { observation } = observationOf({ text: "screen" });
+    const send = (agentKind: string | null) => genericAdapter.submitPrompt({ pid: 1, ref: null, instanceId: "i", paneId: "pane-1", terminalId: "t1", agentKind }, "hi",
+      { signal: new AbortController().signal, request: observation.request });
+    expect(await send("grok")).toEqual({ type: "accepted" });
+    expect((await send("claude")).type).toBe("uncertain");
+    expect((await send(null)).type).toBe("uncertain");
   });
 
   it("accepts an agent leader even when its process title is a version string", () => {

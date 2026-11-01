@@ -48,12 +48,13 @@ export default function contribute(server: PluginServerContext) {
     server.registerProvider(createHerdrProvider(adapter, socketPath, {
       getHerdrSession: () => herdrSession,
       isEnabled: async () => harnessEnabled(await readSettings(), adapter.id),
+      shellAllowed: async () => (await readSettings()).allowShell,
       resolver,
       boundSessions,
       openSessions,
       getPaseo: () => host.get(),
     }));
   }
-  registerManagementRpcs(server, { readTarget, ensureReady: (target) => readiness.ensureReady(target), harnesses, boundSessions, openSessions, resolver, companionStatus: () => companionInstallStatus() });
+  registerManagementRpcs(server, { readTarget, shellAllowed: async () => (await readSettings()).allowShell, ensureReady: (target) => readiness.ensureReady(target), harnesses, boundSessions, openSessions, resolver, companionStatus: () => companionInstallStatus() });
   return () => {};
 }

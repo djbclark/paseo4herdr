@@ -157,8 +157,11 @@ export type RestoredPromptOutcome = "cleared" | "kept" | "unknown" | "unsupporte
  * as commands. Absent = shells are refused (`isOccupant` false for a shell leader).
  */
 export interface ShellSupport {
-  /** Whether this foreground process is a shell (or multiplexer) that executes whatever is typed at it. */
-  isShell(process: { name: string; argv0?: string | null }): boolean;
+  /**
+   * Whether this foreground process is a command shell that executes whatever is typed at it. Judged by the kernel process
+   * name only: argv0 is whatever the program was started as (`exec -a zsh vim`). A multiplexer or `login` is not a shell.
+   */
+  isShell(process: { name: string }): boolean;
   /** Keys that stop a command running in the foreground; never sent while the shell itself is idle. */
   readonly interruptKeys: readonly string[];
   /** Shown when the binding opens with the flag on and with every accepted prompt. */
@@ -170,12 +173,16 @@ export interface ShellSupport {
   submit(target: InputTarget & { instanceId: string; paneId: string; terminalId: string }, text: string, ctx: {
     signal: AbortSignal;
     request(method: string, params?: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<unknown>;
+    /** Whether shell input is still allowed (kill switch, plugin setting, session generation). Checked before any write. */
+    stillAllowed(): Promise<boolean>;
   }): Promise<PromptDelivery>;
 }
 export interface InputTarget {
   pid: number;
   /** Null only when the adapter's binding mode is "pane". */
   ref: AgentSessionRef | null;
+  /** Herdr's `agent` kind for the bound pane as last validated (null = none detected). */
+  agentKind?: string | null;
   /** Present for pane-bound sessions; process info as last validated. */
   pane?: { paneId: string; terminalId: string; process: PaneProcessInfo };
 }

@@ -216,6 +216,17 @@ export const herdrChatAllowShellRpc = defineRpc({
 });
 
 /**
+ * After a shell prompt whose delivery Paseo could not confirm (typing or Enter failed or timed out), shell input stays blocked
+ * for that conversation: text may sit on the command line, or the command may have run. The user checks the terminal and
+ * calls this (or reopens the conversation) to continue. `acknowledged` is false when nothing was blocked.
+ */
+export const herdrChatShellAcknowledgeRpc = defineRpc({
+  name: "herdr.chat.shell-acknowledge",
+  input: z.object({ agentId: z.string().min(1) }),
+  output: z.object({ acknowledged: z.boolean() }),
+});
+
+/**
  * Archive the duplicate chats the user was shown for one terminal, after the server re-reads the owner chat
  * (compare-and-archive): nothing is archived unless `ownerId` is still the terminal's owner, and only ids that are
  * still its live duplicates are. Never starts Herdr. Archived chats stay restorable from Paseo's archive.

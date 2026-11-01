@@ -5,7 +5,7 @@ import type { PluginHandlerContext, PluginServerContext } from "@getpaseo/plugin
 
 // Derived from the SDK: Paseo's compiler can't resolve @getpaseo/client in an install without node_modules.
 type PaseoApi = PluginHandlerContext["paseo"];
-import { herdrAgentRestartRpc, herdrChatAllowShellRpc, herdrChatReadyRpc, herdrDiagnosticsRpc, herdrDuplicatesArchiveRpc, herdrFoldersSuggestRpc, herdrOverviewRpc, herdrTargetRpc, herdrWorkspaceCreateRpc, type CompanionStatus, type HerdrTarget, type FolderSuggestion, type OverviewAgent, type OverviewTab, type OverviewWorkspace } from "../shared/rpc.js";
+import { herdrAgentRestartRpc, herdrChatAllowShellRpc, herdrChatShellAcknowledgeRpc, herdrChatReadyRpc, herdrDiagnosticsRpc, herdrDuplicatesArchiveRpc, herdrFoldersSuggestRpc, herdrOverviewRpc, herdrTargetRpc, herdrWorkspaceCreateRpc, type CompanionStatus, type HerdrTarget, type FolderSuggestion, type OverviewAgent, type OverviewTab, type OverviewWorkspace } from "../shared/rpc.js";
 import { parseBinding, sameRef, sessionRefOf, type Binding } from "./binding.js";
 import { expandHome, suggestFolders } from "./folders.js";
 import { restartAgent } from "./restart.js";
@@ -43,6 +43,8 @@ export interface ManagementDeps {
   restart?: typeof restartAgent;
   /** Bound chats awaiting `herdr.chat.ready`. */
   boundSessions?: BoundSessions;
+  /** The plugin's `allowShell` setting; shell input can only be turned on while it is on. Absent = off. */
+  shellAllowed?: () => Promise<boolean>;
   /** Open conversations by Paseo agent id (`herdr.chat.allow-shell`). */
   openSessions?: OpenSessions;
   /** Environment the CLI would resolve its socket with; defaults to `process.env`. */
@@ -475,10 +477,27 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
 
   server.handle(herdrChatAllowShellRpc, async ({ agentId, enabled }) => {
     const sessions = deps.openSessions?.byAgentId(agentId) ?? [];
-    if (sessions.length === 0) throw new Error("This conversation is not open in the Herdr plugin; open it in Paseo first.");
+    if (enabled && !(await deps.shellAllowed?.().catch(() => false))) {
+      throw new Error("Shell input is turned off in the Herdr plugin settings; turn on \"Allow shell input\" there first.");
+    }
+    if (sessions.length === 0) {
+      // Not open: Paseo owns the stored flag and the plugin cannot rewrite it, so remember the revocation; the next open clears it.
+      if (enabled) throw new Error("This conversation is not open in the Herdr plugin; open it in Paseo first.");
+      deps.openSessions?.revokeShell(agentId);
+      return { enabled, applied: false };
+    }
+    if (enabled) deps.openSessions?.clearRevoked(agentId);
     let applied = false;
     for (const session of sessions) applied = session.setAllowShell(enabled).applied || applied;
     return { enabled, applied };
+  });
+
+  server.handle(herdrChatShellAcknowledgeRpc, async ({ agentId }) => {
+    const sessions = deps.openSessions?.byAgentId(agentId) ?? [];
+    if (sessions.length === 0) throw new Error("This conversation is not open in the Herdr plugin; open it in Paseo first.");
+    let acknowledged = false;
+    for (const session of sessions) acknowledged = session.acknowledgeShell() || acknowledged;
+    return { acknowledged };
   });
 
   server.handle(herdrWorkspaceCreateRpc, async ({ cwd, label }) => {

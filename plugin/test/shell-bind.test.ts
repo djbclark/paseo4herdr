@@ -28,7 +28,7 @@ afterEach(async () => {
 const paneRow = { pane_id: "pane-shell", terminal_id: "t-shell", workspace_id: "w", tab_id: "t", focused: true, agent: null, agent_status: "unknown", revision: 1, cwd: "/work" };
 const agentRow = { terminal_id: "t-shell", pane_id: "pane-shell", agent: "grok", name: null, agent_status: "idle", workspace_id: "w", tab_id: "t", focused: true, revision: 1, cwd: "/work" };
 
-async function rig(listedAgents: unknown[] = []) {
+async function rig(listedAgents: unknown[] = [], shellAllowed = true) {
   directory = await mkdtemp(join(tmpdir(), "herdr-shell-bind-"));
   const socket = join(directory, "herdr.sock");
   const sent: Array<{ method: string; params: Record<string, unknown> }> = [];
@@ -53,7 +53,7 @@ async function rig(listedAgents: unknown[] = []) {
     });
   });
   await new Promise<void>((resolve) => server?.listen(socket, resolve));
-  const provider = createHerdrProvider(genericAdapter, async () => socket, { getHerdrSession: () => null, bindHistoryDelayMs: 60_000 });
+  const provider = createHerdrProvider(genericAdapter, async () => socket, { getHerdrSession: () => null, bindHistoryDelayMs: 60_000, shellAllowed: async () => shellAllowed });
   const connection = await provider.connect({ versions: [1], capabilities: ["session.list", "session.persistence", "prompt.message"] });
   connections.push(connection);
   const events: ProviderEvent[] = [];
@@ -78,6 +78,7 @@ it("binds a plain shell only with allowShell: the flag and the shell occupant pe
   await connection.send({ type: "session.prompt", sessionId: "s1", prompt: { clientMessageId: "p1", delivery: "auto", input: { type: "message", content: [{ type: "text", text: "echo hi" }] } } });
   await vi.waitFor(() => expect(events.some((event) => event.type === "session.prompt_result" && event.result.type === "turn")).toBe(true));
   expect(sent.filter((r) => r.method === "pane.send_text" || r.method === "pane.send_keys")).toEqual([
+    { method: "pane.send_keys", params: { pane_id: "pane-shell", keys: ["ctrl+e", "ctrl+u"] } },
     { method: "pane.send_text", params: { pane_id: "pane-shell", text: "echo hi" } },
     { method: "pane.send_keys", params: { pane_id: "pane-shell", keys: ["enter"] } },
   ]);
@@ -94,4 +95,11 @@ it("allowShell on a pane where Herdr detects an agent is refused", async () => {
   const { open, failure } = await rig([agentRow]);
   await open("open", bound({ allowShell: true }));
   expect(await failure("open")).toMatch(/shell input applies only to plain shell panes/);
+});
+
+it("allowShell is refused at bind while the plugin setting is off, and the shell pane is not even listed", async () => {
+  const { sent, open, failure } = await rig([], false);
+  await open("open", bound({ allowShell: true }));
+  expect(await failure("open")).toMatch(/turned off in the Herdr plugin settings/);
+  expect(sent.some((request) => request.method === "pane.list" || request.method.startsWith("pane.send"))).toBe(false);
 });

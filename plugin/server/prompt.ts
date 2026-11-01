@@ -58,6 +58,10 @@ export class PromptController {
     }
     const text = prompt.input.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
     if (!text.trim()) return fail("Prompt cannot be empty");
+    // An earlier shell delivery of unknown outcome may have left text on the command line (or run it): never type over that unasked.
+    if (state.binding.occupant?.shell && session.shellUncertain) {
+      return fail("An earlier command may have been typed into the shell without being confirmed. Check the terminal, then reopen this conversation or acknowledge it to continue. Nothing was typed.");
+    }
     // This reservation is synchronous: no second request can pass while preflight awaits I/O.
     state.admitting = true;
     const generation = state.generation;
@@ -93,13 +97,14 @@ export class PromptController {
         baseline: { stateChangeSeq: agent.state_change_seq, completionSeq: agent.completion_seq ?? null } });
       reserved = true;
       const target = { pid: occupant.pid, ref, instanceId: occupant.instanceId,
-        paneId: agent.pane_id, terminalId: agent.terminal_id,
+        paneId: agent.pane_id, terminalId: agent.terminal_id, agentKind: agent.agent ?? null,
         pane: { paneId: agent.pane_id, terminalId: agent.terminal_id, process: processInfo } };
-      const ctx = { signal: session.signal, request: session.deps.request };
+      const ctx = { signal: session.signal, request: session.deps.request, stillAllowed: () => session.shellStillAllowed(generation) };
       // A shell occupant is typed into as a command line; every other occupant goes through the adapter's own submit.
       const shell = occupant.shell ? session.adapter.shell : undefined;
       if (occupant.shell && !shell) throw new Error("This adapter cannot type into a shell");
       const outcome = shell ? await shell.submit(target, text, ctx) : await session.adapter.submitPrompt(target, text, ctx);
+      if (shell && outcome.type === "uncertain") session.markShellUncertain();
       if (shell && session.current(generation) && outcome.type !== "rejected") session.shellPromptNotice();
       if (!session.current(generation)) return;
       if (outcome.type === "rejected") {
@@ -116,7 +121,10 @@ export class PromptController {
       }
     } catch (error) {
       if (session.isAborted) return;
-      if (reserved) state.tracker.pendingUncertain(error instanceof Error ? error.message : String(error));
+      if (reserved) {
+        if (state.binding.occupant?.shell) session.markShellUncertain();
+        state.tracker.pendingUncertain(error instanceof Error ? error.message : String(error));
+      }
       else fail(error instanceof Error ? error.message : String(error));
     } finally {
       state.admitting = false;

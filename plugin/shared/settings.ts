@@ -15,5 +15,10 @@ export const herdrSettings = defineSettings({
     herdrSession: z.string().default(""),
     /** Off: no new OMP discovery, import or launch. Open chats stay observable and can finish or stop. */
     enableOmp: z.boolean().default(true),
+    /**
+     * Global gate for shell input (default off). Off: every binding is treated as flag-off, persisted ones included, and an
+     * open shell conversation freezes. Only the settings UI writes it; no RPC or bind option does.
+     */
+    allowShell: z.boolean().default(false),
   }),
 });

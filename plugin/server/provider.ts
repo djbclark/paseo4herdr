@@ -39,6 +39,8 @@ export interface ProviderHooks {
   boundSessions?: BoundSessions;
   /** Shared with the management RPCs so `herdr.chat.allow-shell` can reach an open conversation. */
   openSessions?: OpenSessions;
+  /** The plugin's `allowShell` setting (default off): the global gate for shell input. Absent = off. */
+  shellAllowed?: () => Promise<boolean>;
   /** The Paseo API handle captured from a lifecycle hook (null until one has fired). */
   getPaseo?: () => PermissionResponder | null;
   /** Tests: replaces the real timer between approval polls. */
@@ -106,6 +108,8 @@ export function createHerdrProvider(
           ...(hooks.getPaseo ? { getPaseo: hooks.getPaseo } : {}),
           ...(hooks.approvalSleep ? { approvalSleep: hooks.approvalSleep } : {}),
           getHerdrSession: () => herdrSession,
+          ...(hooks.shellAllowed ? { shellAllowed: hooks.shellAllowed } : {}),
+          shellRevoked: (agentId) => hooks.openSessions?.isRevoked(agentId) ?? false,
           routesNewWork: (kind) => resolver.select(kind) === adapter,
           ...(hooks.bindHistoryDelayMs !== undefined ? { bindHistoryDelayMs: hooks.bindHistoryDelayMs } : {}),
           // An adapter without a launch spec is import/bind only; `session.open` refuses to create.
@@ -208,6 +212,7 @@ export function createHerdrProvider(
                 if (closed) return;
                 const allowShell = parsed.data.allowShell === true;
                 if (allowShell && !adapter.shell) throw new Error(`${adapter.label} conversations cannot take shell input`);
+                if (allowShell && !(await hooks.shellAllowed?.().catch(() => false))) throw new Error("Shell input is turned off in the Herdr plugin settings; turn on \"Allow shell input\" there first");
                 const agent = (await (allowShell ? deps.listAgents(controller.signal, { includeShells: true }) : deps.listAgents(controller.signal))).find((candidate) => candidate.terminal_id === parsed.data.terminalId);
                 if (closed) return;
                 if (!agent) throw new Error(`The Herdr agent in terminal ${parsed.data.terminalId} is no longer running`);

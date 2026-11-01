@@ -128,6 +128,12 @@ function HerdrSettingsForm({ settings, theme }: { settings: Ready; theme: Plugin
     },
     [settings, afterSave],
   );
+  const toggleShell = useCallback(
+    async (allowShell: boolean) => {
+      if (await settings.save({ ...settings.values, allowShell }, settings.revision)) afterSave();
+    },
+    [settings, afterSave],
+  );
   const changeSession = useCallback(
     (session: string) => setDraft((d) => ({ ...d, session })),
     [],
@@ -152,6 +158,13 @@ function HerdrSettingsForm({ settings, theme }: { settings: Ready; theme: Plugin
             value={settings.values.enableOmp}
             disabled={settings.saving}
             onValueChange={toggleOmp}
+          />
+          <SettingsSwitch
+            label="Allow shell input"
+            hint="Off (default): no conversation can type into a plain shell pane, whatever its own setting says; open shell conversations freeze. On: a conversation that opted in (herdrBind allowShell) runs its prompts as shell commands. Turning this off does not re-arm after it is turned on again."
+            value={settings.values.allowShell}
+            disabled={settings.saving}
+            onValueChange={toggleShell}
           />
           <SettingsInput
             label="Herdr session"
