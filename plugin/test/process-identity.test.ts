@@ -37,6 +37,11 @@ describe("processInstanceId", () => {
     expect(a).not.toBe(b);
   });
 
+  it("trims the trailing column padding real macOS ps emits after lstart", async () => {
+    const { deps } = psDeps("Sat Oct 31 00:33:57 2026    \n");
+    expect(await processInstanceId(9, deps)).toBe("9@Sat Oct 31 00:33:57 2026");
+  });
+
   it("throws when ps fails", async () => {
     const deps = { execFile: async () => { throw new Error("ps exited 1"); }, platform: "darwin" as const };
     await expect(processInstanceId(9, deps)).rejects.toThrow(/ps exited 1/);

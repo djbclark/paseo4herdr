@@ -52,8 +52,9 @@ Seam 2 is one fresh connection per request (5 s timeout; 15 s for `agent.prompt`
 | `host.ts` | `PaseoHost`: keeps the Paseo API handle captured from a lifecycle hook, for answering permissions. |
 | `herdr-commands.ts` | Builds `herdr agent attach` and `pane read` commands. |
 | `herdr/` | The Herdr seam: `client.ts` (requests, subscription, `checkHerdrStatus`, `MIN_HERDR_VERSION`), `schema.ts` (zod wire schemas), `target.ts` (settings and environment to a target; `TargetReadiness`, auto-start), `socket-path.ts`, `targets.ts` (`listPaneTargets`). |
-| `harness/` | The adapter contract and routing. `types.ts` (`HarnessAdapter`), `registry.ts` (the registered list: OMP), `resolve.ts` (kind to adapter). |
+| `harness/` | The adapter contract and routing. `types.ts` (`HarnessAdapter`), `registry.ts` (the registered list: OMP, generic), `resolve.ts` (kind to adapter), `process-identity.ts` (`processInstanceId`: pid plus start time). |
 | `harness/omp/` | The OMP adapter: `adapter.ts`, `input.ts` (companion client), `transcript.ts` and `to-provider-items.ts` (session file to timeline), `forks.ts`, `companion-install.ts`, `companion-hash.ts` (generated), and `vendor/` (a trimmed copy of Paseo's OMP history mapper; see `VENDORED.md`). |
+| `harness/generic/` | The generic adapter for any Herdr-detected kind without a dedicated adapter: `adapter.ts` (`agent.prompt` submit, shell refusal, identity), `screen.ts` (the pane's screen as one mutable row plus an in-memory prompt ledger). |
 
 ### `plugin/client/` and `plugin/index.client.tsx`
 
@@ -86,7 +87,18 @@ Vitest. `fake-herdr.ts` is an in-process fake of Herdr's JSON API over a real Un
 
 Everything harness-specific sits behind `HarnessAdapter` (`server/harness/types.ts`): which Herdr agent kinds it claims, how to launch and resume it, how to find and read its transcript, how to submit a prompt, interrupt, read configuration, and read and resolve approvals. Optional members (`launch`, `readConfig`, `snapshotApprovals`, `findForks`, and so on) switch features on and off per adapter. The neutral modules (`session`, `live-session`, `turns`, `prompt`, `approvals`, `config`, `launch`, `restart`) call only this interface.
 
-`resolve.ts` maps a Herdr agent kind to an adapter for new work (`select`) and validates an existing binding (`adapterAcceptsKind`). The OMP adapter is the only one registered. The contract already has a pane-bound binding mode (`binding: "pane"`), a status-based turn-evidence mode (`turnEvidence: "status"`) and a fallback adapter kind (`nativeKinds: "any"`), and `listPaneTargets` is the single place that decides which panes can be bound. Planned/not implemented: an adapter that uses them, and plain-shell panes in `listPaneTargets`.
+`resolve.ts` maps a Herdr agent kind to an adapter for new work (`select`) and validates an existing binding (`adapterAcceptsKind`). Two adapters are registered: OMP, and the generic adapter as the single `"any"` fallback, so a dedicated adapter always wins for its kind. The contract has a pane-bound binding mode (`binding: "pane"`), a status-based turn-evidence mode (`turnEvidence: "status"`) and a fallback adapter kind (`nativeKinds: "any"`); `listPaneTargets` is the single place that decides which panes can be bound. An adapter that serves several kinds can give per-kind Stop keys with the optional `interruptKeysFor(kind)`; an empty list refuses Stop. Not implemented: plain-shell panes in `listPaneTargets`.
+
+### The generic adapter
+
+It drives any pane Herdr detects as an agent, with no companion and no native session:
+
+- **Timeline.** One `assistant_message` row with the fixed id `generic:<terminalId>:screen` holds the pane's visible screen in a fenced block (`pane.read`, source `visible`: a `recent` read taller than the viewport makes Herdr scroll an idle alternate-screen TUI). Prompts sent from Paseo are remembered in memory and shown as `user_message` rows `generic:<terminalId>:user:<n>` ahead of it; nothing is persisted, so a reopened chat shows only the screen. `extendsPrevious` is always true and `chainIds` is empty, so a rewritten screen never reads as a branch; a failed read keeps the last good screen and never throws.
+- **Prompts.** `agent.prompt` through `classifyHerdrPrompt`. A timeout or any error not proven to precede the write is uncertain and is never resent. Admission is the core's: Herdr `idle` or `done` only.
+- **Turns.** Herdr status counters plus idle-settle (`turnEvidence: "status"`).
+- **Identity.** pid plus process start time (`processInstanceId`). A `ps` failure means "cannot validate": the prompt is rejected, the chat is not frozen as replaced.
+- **Refusals.** A shell or multiplexer as the foreground leader (`isOccupant` false), and, on first bind, a kind another adapter owns.
+- **Stop.** `esc` for a detected kind. Approvals stay in the terminal (Herdr `blocked` raises the "needs approval" notice).
 
 ## Session binding
 

@@ -244,7 +244,8 @@ describe("restored-prompt notice (F10)", () => {
     expect(text).not.toMatch(/nothing was typed|not delivered|did not receive|was not sent|not typed/i);
     expect(text).not.toMatch(/was (delivered|received|sent)\b/i);
     expect(notices[0]!.title).toBe("Fake may not have received your message");
-    expect(notices[0]!.description).toBe("The message was typed into the terminal and may still be in the input box. Check the terminal before sending it again.");
+    expect(notices[0]!.description).not.toMatch(/\bwas typed\b/i); // delivery is unconfirmed: never assert the text was typed
+    expect(notices[0]!.description).toMatch(/may have been typed/i);
   });
 
   it("an adapter that cannot tell, or fails, gets the conditional notice", async () => {

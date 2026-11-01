@@ -144,7 +144,16 @@ export class PromptController {
         done();
         return;
       }
-      await session.deps.request("pane.send_keys", { pane_id: agent.pane_id, keys: [...session.adapter.interruptKeys] }, { signal: session.signal });
+      const keys = session.adapter.interruptKeysFor?.(agent.agent) ?? session.adapter.interruptKeys;
+      if (!keys.length) {
+        session.emit({ type: "session.notice", sessionId: session.sessionId, notice: {
+          id: "interrupt-unavailable", severity: "warning", title: "Stop is not available for this agent",
+          description: "Paseo has no safe interrupt key for this agent; no key was sent. Stop it in the terminal.",
+        } });
+        done();
+        return;
+      }
+      await session.deps.request("pane.send_keys", { pane_id: agent.pane_id, keys: [...keys] }, { signal: session.signal });
       if (!session.current(generation)) return;
       state.tracker.interruptRequested();
     } catch (error) {

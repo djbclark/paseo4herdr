@@ -166,6 +166,6 @@ A chat remembers the Herdr session it was created on. After you change settings 
 ## Known limits
 
 - Replies appear a message at a time, not token by token.
-- Only agents Herdr lists as agents are supported, and only OMP. Plain shell panes don't appear.
+- Only agents Herdr lists as agents are supported. OMP has full support; any other detected agent opens as a "Generic" chat: you see the pane's screen as one updating message, prompts you send appear above it, and approvals, model changes, restart and forks are not available. Plain shell panes don't appear and are refused.
 - Only plain-text messages can be sent from Paseo.
 - If an agent disappears from Herdr, its chat goes read-only; a new chat is needed for any agent that replaces it.

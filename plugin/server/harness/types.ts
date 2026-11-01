@@ -186,6 +186,11 @@ export interface HarnessAdapter {
     request(method: string, params?: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<unknown>;
   }): Promise<PromptDelivery>;
   readonly interruptKeys: readonly string[];
+  /**
+   * Optional: keys that stop a turn of a pane whose Herdr `agent` kind is `kind`, for an adapter that serves several
+   * kinds. Absent = `interruptKeys`. An empty list means Stop is refused for that kind (no key is sent).
+   */
+  interruptKeysFor?(kind: string | null | undefined): readonly string[];
   readonly promptWhileWorking: "reject";
   isOccupant(proc: PaneProcessInfo): boolean;
   readonly blockedHint: string;
