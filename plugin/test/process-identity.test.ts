@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { processInstanceId, type ProcessIdentityDeps } from "../server/harness/process-identity.js";
+import { processGroupMembers, processInstanceId, type ProcessIdentityDeps } from "../server/harness/process-identity.js";
 
 const psDeps = (stdout: string) => {
   const execFile = vi.fn<ProcessIdentityDeps["execFile"]>(async () => ({ stdout }));
@@ -100,5 +100,34 @@ describe("processInstanceId", () => {
       await expect(processInstanceId(5, linux("garbage").deps)).rejects.toThrow(/malformed/);
       await expect(processInstanceId(5, linux("").deps)).rejects.toThrow(/malformed/);
     });
+  });
+});
+
+describe("processGroupMembers", () => {
+  const listing = "    1     1\n  100   100\n  200   100\n  300   300\n";
+
+  it("lists every pid of the group from ps -A, root processes included, as an argv list with a 2 s timeout and LC_ALL=C", async () => {
+    const { execFile, deps } = psDeps(listing);
+    expect(await processGroupMembers(100, deps)).toEqual([100, 200]);
+    const [file, args, options] = execFile.mock.calls[0]!;
+    expect(file).toBe("/bin/ps");
+    expect(args).toEqual(["-A", "-o", "pid=,pgid="]);
+    expect(options.timeout).toBe(2000);
+    expect(options.env.LC_ALL).toBe("C");
+    expect(options).not.toHaveProperty("shell");
+  });
+
+  it("returns a lone member, and nothing for a group ps does not list", async () => {
+    expect(await processGroupMembers(300, psDeps(listing).deps)).toEqual([300]);
+    expect(await processGroupMembers(999, psDeps(listing).deps)).toEqual([]);
+  });
+
+  it("throws on a ps failure, an empty listing and an unparseable line; never reads them as a lone shell", async () => {
+    const failing = { execFile: vi.fn<ProcessIdentityDeps["execFile"]>(async () => { throw new Error("ps timed out"); }), platform: "darwin" as const };
+    await expect(processGroupMembers(100, failing)).rejects.toThrow(/timed out/);
+    await expect(processGroupMembers(100, psDeps("").deps)).rejects.toThrow(/no processes/);
+    await expect(processGroupMembers(100, psDeps("  100   100\n  garbage\n").deps)).rejects.toThrow(/unrecognised/);
+    await expect(processGroupMembers(100, psDeps("  100   ?\n").deps)).rejects.toThrow(/unrecognised/);
+    await expect(processGroupMembers(0, psDeps(listing).deps)).rejects.toThrow(/invalid process group/);
   });
 });

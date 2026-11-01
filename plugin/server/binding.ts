@@ -29,6 +29,12 @@ export interface Binding {
   occupant?: { pid: number; tty: string | null; instanceId: string; shell?: true };
   /** Opt-in: prompt text may run as shell commands in a plain shell pane. Absent = false (shells are refused). */
   allowShell?: boolean;
+  /**
+   * The plugin setting's enable epoch this binding opted in under. The opt-in counts only while the setting still holds this
+   * epoch (the settings UI stores a new one each time it turns the setting on). Absent with `allowShell` = stored before
+   * epochs existed: treated as flag-off and revoked at the next open.
+   */
+  allowShellEpoch?: number;
   /** Optional, newest last, at most {@link MAX_DECISIONS}. */
   decisions?: StoredDecision[];
 }
@@ -38,7 +44,7 @@ export function sessionRefOf(agent: AgentInfo): AgentSessionRef | null {
   return agent.agent_session ? { kind: agent.agent_session.kind, value: agent.agent_session.value } : null;
 }
 
-export function bindingOf(agent: AgentInfo, adapter: HarnessAdapter, herdrSession: string | null, options: { allowShell?: boolean } = {}): Binding {
+export function bindingOf(agent: AgentInfo, adapter: HarnessAdapter, herdrSession: string | null, options: { allowShell?: boolean; allowShellEpoch?: number } = {}): Binding {
   return {
     harness: adapter.id,
     herdrSession,
@@ -47,7 +53,7 @@ export function bindingOf(agent: AgentInfo, adapter: HarnessAdapter, herdrSessio
     sessionRef: sessionRefOf(agent),
     cwd: agent.cwd ?? agent.foreground_cwd ?? "",
     submittedMessages: {},
-    ...(options.allowShell ? { allowShell: true } : {}),
+    ...(options.allowShell ? { allowShell: true, ...(options.allowShellEpoch !== undefined ? { allowShellEpoch: options.allowShellEpoch } : {}) } : {}),
   };
 }
 
@@ -72,7 +78,7 @@ export function persistenceOf(binding: Binding): ProviderPersistence {
       cwd: binding.cwd,
       submittedMessages: capSubmittedMessages(binding.submittedMessages),
       ...(binding.occupant ? { occupant: binding.occupant } : {}),
-      ...(binding.allowShell ? { allowShell: true } : {}),
+      ...(binding.allowShell ? { allowShell: true, ...(binding.allowShellEpoch !== undefined ? { allowShellEpoch: binding.allowShellEpoch } : {}) } : {}),
       ...(binding.decisions?.length ? { decisions: binding.decisions.slice(-MAX_DECISIONS) as unknown as ProviderPersistence["data"] } : {}),
     },
   };
@@ -90,6 +96,7 @@ export function parseBinding(persistence: ProviderPersistence, adapter: HarnessA
     submittedMessages: z.record(z.string(), z.string()).default({}),
     occupant: z.object({ pid: z.number().int().positive(), tty: z.string().nullable(), instanceId: z.string().min(1), shell: z.literal(true).optional() }).optional(),
     allowShell: z.boolean().optional(),
+    allowShellEpoch: z.number().int().nonnegative().optional(),
     // Rows are cosmetic: a malformed entry is dropped rather than failing the whole binding.
     decisions: z.array(z.unknown()).optional(),
   }).parse(persistence.data);
@@ -103,7 +110,7 @@ export function parseBinding(persistence: ProviderPersistence, adapter: HarnessA
     cwd: parsed.cwd,
     submittedMessages: capSubmittedMessages(parsed.submittedMessages),
     ...(parsed.occupant ? { occupant: parsed.occupant } : {}),
-    ...(parsed.allowShell ? { allowShell: true } : {}),
+    ...(parsed.allowShell ? { allowShell: true, ...(parsed.allowShellEpoch !== undefined ? { allowShellEpoch: parsed.allowShellEpoch } : {}) } : {}),
     ...(parsed.decisions ? { decisions: storedDecisionsOf(parsed.decisions) } : {}),
   };
 }

@@ -8,7 +8,7 @@ import { createHerdrProvider } from "../server/provider.js";
 import { genericAdapter } from "../server/harness/generic/adapter.js";
 import { HERDR_BIND_OPTION } from "../shared/model.js";
 
-vi.mock("../server/harness/process-identity.js", () => ({ processInstanceId: vi.fn(async (pid: number) => `${pid}@Sat Oct 31 00:33:57 2026`) }));
+vi.mock("../server/harness/process-identity.js", () => ({ processInstanceId: vi.fn(async (pid: number) => `${pid}@Sat Oct 31 00:33:57 2026`), processGroupMembers: vi.fn(async (pgid: number) => [pgid]) }));
 
 const config: ProviderSessionConfig = { cwd: "/work", env: {}, mcpServers: {}, settings: {}, persist: true };
 const bound = (extra: Record<string, unknown> = {}): ProviderSessionConfig =>
@@ -45,7 +45,7 @@ async function rig(listedAgents: unknown[] = [], shellAllowed = true) {
         return;
       }
       const result = request.method === "pane.process_info" ? { type: "pane_process_info", process_info: {
-          pane_id: "pane-shell", shell_pid: 100, foreground_process_group_id: 100, tty: "/dev/ttys001", foreground_processes: [{ pid: 100, name: "zsh" }] } } :
+          pane_id: "pane-shell", shell_pid: 100, foreground_process_group_id: 100, tty: "/dev/ttys001", foreground_processes: [{ pid: 100, name: "zsh", argv: ["zsh"] }] } } :
         request.method === "agent.list" ? { type: "agent_list", agents: listedAgents } :
         request.method === "pane.list" ? { type: "pane_list", panes: [paneRow] } :
         request.method === "pane.read" ? { type: "pane_read", read: { pane_id: "pane-shell", text: "$ " } } : { type: "ok" };
@@ -53,7 +53,7 @@ async function rig(listedAgents: unknown[] = [], shellAllowed = true) {
     });
   });
   await new Promise<void>((resolve) => server?.listen(socket, resolve));
-  const provider = createHerdrProvider(genericAdapter, async () => socket, { getHerdrSession: () => null, bindHistoryDelayMs: 60_000, shellAllowed: async () => shellAllowed });
+  const provider = createHerdrProvider(genericAdapter, async () => socket, { getHerdrSession: () => null, bindHistoryDelayMs: 60_000, shellEpoch: async () => shellAllowed ? 7 : null });
   const connection = await provider.connect({ versions: [1], capabilities: ["session.list", "session.persistence", "prompt.message"] });
   connections.push(connection);
   const events: ProviderEvent[] = [];
@@ -73,7 +73,7 @@ it("binds a plain shell only with allowShell: the flag and the shell occupant pe
   await open("open", bound({ allowShell: true }));
   await vi.waitFor(() => expect(events.some((event) => event.type === "session.ready")).toBe(true));
   const opened = events.find((event) => event.type === "session.opened");
-  expect(opened && opened.type === "session.opened" && opened.persistence?.data).toMatchObject({ allowShell: true, terminalId: "t-shell", occupant: { pid: 100, shell: true } });
+  expect(opened && opened.type === "session.opened" && opened.persistence?.data).toMatchObject({ allowShell: true, allowShellEpoch: 7, terminalId: "t-shell", occupant: { pid: 100, shell: true } });
   expect(events.some((event) => event.type === "session.notice" && event.notice.description === "Prompt text runs as shell commands.")).toBe(true);
   await connection.send({ type: "session.prompt", sessionId: "s1", prompt: { clientMessageId: "p1", delivery: "auto", input: { type: "message", content: [{ type: "text", text: "echo hi" }] } } });
   await vi.waitFor(() => expect(events.some((event) => event.type === "session.prompt_result" && event.result.type === "turn")).toBe(true));

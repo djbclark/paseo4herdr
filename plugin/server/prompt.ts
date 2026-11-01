@@ -60,7 +60,7 @@ export class PromptController {
     if (!text.trim()) return fail("Prompt cannot be empty");
     // An earlier shell delivery of unknown outcome may have left text on the command line (or run it): never type over that unasked.
     if (state.binding.occupant?.shell && session.shellUncertain) {
-      return fail("An earlier command may have been typed into the shell without being confirmed. Check the terminal, then reopen this conversation or acknowledge it to continue. Nothing was typed.");
+      return fail("An earlier command may have been typed into the shell without being confirmed. Check the terminal, then reopen this conversation to continue. Nothing was typed.");
     }
     // This reservation is synchronous: no second request can pass while preflight awaits I/O.
     state.admitting = true;
@@ -99,7 +99,7 @@ export class PromptController {
       const target = { pid: occupant.pid, ref, instanceId: occupant.instanceId,
         paneId: agent.pane_id, terminalId: agent.terminal_id, agentKind: agent.agent ?? null,
         pane: { paneId: agent.pane_id, terminalId: agent.terminal_id, process: processInfo } };
-      const ctx = { signal: session.signal, request: session.deps.request, stillAllowed: () => session.shellStillAllowed(generation) };
+      const ctx = { signal: session.signal, request: session.deps.request, stillAllowed: () => session.shellStillAllowed(generation), allowedNow: () => session.shellAllowedNow(generation) };
       // A shell occupant is typed into as a command line; every other occupant goes through the adapter's own submit.
       const shell = occupant.shell ? session.adapter.shell : undefined;
       if (occupant.shell && !shell) throw new Error("This adapter cannot type into a shell");

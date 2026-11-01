@@ -13,7 +13,7 @@ import {
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { herdrDiagnosticsRpc, herdrTargetRpc } from "../shared/rpc.js";
 import { herdrSettings } from "../shared/settings.js";
-import { describeTarget, diagnosticsText, errorMessage, OVERVIEW_QUERY_KEY, TARGET_QUERY_KEY } from "./helpers.js";
+import { describeTarget, diagnosticsText, errorMessage, OVERVIEW_QUERY_KEY, TARGET_QUERY_KEY, withShellSwitch } from "./helpers.js";
 
 type Ready = Extract<SettingsState<typeof herdrSettings.schema>, { status: "ready" }>;
 
@@ -130,7 +130,7 @@ function HerdrSettingsForm({ settings, theme }: { settings: Ready; theme: Plugin
   );
   const toggleShell = useCallback(
     async (allowShell: boolean) => {
-      if (await settings.save({ ...settings.values, allowShell }, settings.revision)) afterSave();
+      if (await settings.save(withShellSwitch(settings.values, allowShell, Date.now()), settings.revision)) afterSave();
     },
     [settings, afterSave],
   );
@@ -161,7 +161,7 @@ function HerdrSettingsForm({ settings, theme }: { settings: Ready; theme: Plugin
           />
           <SettingsSwitch
             label="Allow shell input"
-            hint="Off (default): no conversation can type into a plain shell pane, whatever its own setting says; open shell conversations freeze. On: a conversation that opted in (herdrBind allowShell) runs its prompts as shell commands. Turning this off does not re-arm after it is turned on again."
+            hint="Off (default): no conversation can type into a plain shell pane, whatever its own setting says; open shell conversations freeze. On: a conversation that opted in (herdrBind allowShell) runs its prompts as shell commands. Turning this off disarms every conversation that opted in, closed ones included; turning it on again does not re-arm them. It guards against an accidental opt-in, not against a hostile Paseo client."
             value={settings.values.allowShell}
             disabled={settings.saving}
             onValueChange={toggleShell}

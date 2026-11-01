@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { archiveDuplicatesLabel, archiveFailureMessage, companionBanner, duplicateArchiveSkippedMessage, duplicateChatsToArchive, freshDuplicatesToArchive, folderFieldValue, needsHomeExpansion, agentLabel, describeTarget, pathTail, statusLabel, statusTone, validateFolder } from "../client/helpers.js";
+import { withShellSwitch, archiveDuplicatesLabel, archiveFailureMessage, companionBanner, duplicateArchiveSkippedMessage, duplicateChatsToArchive, freshDuplicatesToArchive, folderFieldValue, needsHomeExpansion, agentLabel, describeTarget, pathTail, statusLabel, statusTone, validateFolder } from "../client/helpers.js";
+
+describe("withShellSwitch", () => {
+  const base = { herdrSession: "s", allowShell: false, allowShellEpoch: 0 };
+  it("turning the switch on stores a new epoch, and a second enable never reuses one", () => {
+    const first = withShellSwitch(base, true, 1000);
+    expect(first).toEqual({ herdrSession: "s", allowShell: true, allowShellEpoch: 1000 });
+    const off = withShellSwitch(first, false, 2000);
+    expect(off).toEqual({ herdrSession: "s", allowShell: false, allowShellEpoch: 1000 });
+    expect(withShellSwitch(off, true, 3000).allowShellEpoch).toBe(3000);
+    expect(withShellSwitch(off, true, 1000).allowShellEpoch).toBe(1001); // same clock reading: still a different epoch
+  });
+});
 
 describe("client helpers", () => {
   it("labels and tones statuses", () => {

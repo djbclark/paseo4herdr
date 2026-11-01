@@ -206,8 +206,10 @@ export const herdrChatReadyRpc = defineRpc({
 /**
  * Turn shell input on or off for an open conversation (`agentId` = its Paseo agent id). On makes prompt text run as shell
  * commands in a plain shell pane; off is the kill switch (a conversation bound to a shell freezes). The flag is part of
- * the chat's persistence, so it survives a reload. `applied` is false when the conversation is read-only: the flag is then
- * kept for when it is reopened. Errors when the conversation is not open in this plugin or is bound to an agent.
+ * the chat's persistence, so it survives a reload; turning it on records the plugin setting's current enable epoch, and the
+ * opt-in lasts only while the setting holds that epoch. `applied` is false when the conversation is read-only: the flag is then
+ * kept for when it is reopened. Errors when the plugin setting is off, when no open conversation in this plugin has `agentId`
+ * (for off: nothing was stopped now; a closed conversation loses the flag when it is next opened), or when it is bound to an agent.
  */
 export const herdrChatAllowShellRpc = defineRpc({
   name: "herdr.chat.allow-shell",

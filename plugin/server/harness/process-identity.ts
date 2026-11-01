@@ -61,3 +61,26 @@ export async function processInstanceId(pid: number, deps: Partial<ProcessIdenti
   }
   return `${pid}@${start}`;
 }
+
+/**
+ * Pids that are members of process group `pgid`, from `ps -A -o pid=,pgid=` (every process of every user, root included).
+ * Herdr's own `foreground_processes` on macOS silently omits any process it cannot read (root, setuid: `sudo`, `su`), so it
+ * cannot prove a group holds only the shell. Throws on a `ps` failure, an empty answer or any line that is not two integers:
+ * callers read a throw as "unknown", never as "the group is alone".
+ */
+export async function processGroupMembers(pgid: number, deps: Partial<ProcessIdentityDeps> = {}): Promise<number[]> {
+  if (!Number.isSafeInteger(pgid) || pgid <= 0) throw new Error(`invalid process group: ${pgid}`);
+  const { execFile: run } = { ...defaultDeps, ...deps };
+  const { stdout } = await run(PS_PATH, ["-A", "-o", "pid=,pgid="], { timeout: PS_TIMEOUT_MS, env: { ...process.env, LC_ALL: "C" } });
+  const members: number[] = [];
+  let rows = 0;
+  for (const line of stdout.split("\n")) {
+    if (!line.trim()) continue;
+    const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
+    if (!match) throw new Error("ps returned an unrecognised process listing");
+    rows++;
+    if (Number(match[2]) === pgid) members.push(Number(match[1]));
+  }
+  if (rows === 0) throw new Error("ps returned no processes");
+  return members;
+}

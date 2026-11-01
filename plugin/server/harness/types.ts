@@ -162,6 +162,11 @@ export interface ShellSupport {
    * name only: argv0 is whatever the program was started as (`exec -a zsh vim`). A multiplexer or `login` is not a shell.
    */
   isShell(process: { name: string }): boolean;
+  /**
+   * Every pid in process group `pgid`, from a source that sees what Herdr's foreground list can hide (macOS omits root and
+   * setuid processes). Rejects when it cannot tell; the caller then treats the shell as not idle.
+   */
+  groupMembers(pgid: number): Promise<number[]>;
   /** Keys that stop a command running in the foreground; never sent while the shell itself is idle. */
   readonly interruptKeys: readonly string[];
   /** Shown when the binding opens with the flag on and with every accepted prompt. */
@@ -173,8 +178,10 @@ export interface ShellSupport {
   submit(target: InputTarget & { instanceId: string; paneId: string; terminalId: string }, text: string, ctx: {
     signal: AbortSignal;
     request(method: string, params?: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<unknown>;
-    /** Whether shell input is still allowed (kill switch, plugin setting, session generation). Checked before any write. */
+    /** Async check: shell input is still allowed (kill switch, a fresh read of the plugin setting and its enable epoch, session generation). */
     stillAllowed(): Promise<boolean>;
+    /** Synchronous: same session and generation, flag still on, not revoked. No I/O, so nothing can change between it and the next write. */
+    allowedNow(): boolean;
   }): Promise<PromptDelivery>;
 }
 export interface InputTarget {

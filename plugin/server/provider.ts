@@ -39,8 +39,10 @@ export interface ProviderHooks {
   boundSessions?: BoundSessions;
   /** Shared with the management RPCs so `herdr.chat.allow-shell` can reach an open conversation. */
   openSessions?: OpenSessions;
-  /** The plugin's `allowShell` setting (default off): the global gate for shell input. Absent = off. */
-  shellAllowed?: () => Promise<boolean>;
+  /** The plugin's `allowShell` gate (default off): the enable epoch the settings UI stored when it turned the setting on, or null while closed. Absent = closed. */
+  shellEpoch?: () => Promise<number | null>;
+  /** Synchronous, subscription-fed view of {@link shellEpoch}; null = closed or not read yet. */
+  shellEpochNow?: () => number | null;
   /** The Paseo API handle captured from a lifecycle hook (null until one has fired). */
   getPaseo?: () => PermissionResponder | null;
   /** Tests: replaces the real timer between approval polls. */
@@ -108,7 +110,8 @@ export function createHerdrProvider(
           ...(hooks.getPaseo ? { getPaseo: hooks.getPaseo } : {}),
           ...(hooks.approvalSleep ? { approvalSleep: hooks.approvalSleep } : {}),
           getHerdrSession: () => herdrSession,
-          ...(hooks.shellAllowed ? { shellAllowed: hooks.shellAllowed } : {}),
+          ...(hooks.shellEpoch ? { shellEpoch: hooks.shellEpoch } : {}),
+          ...(hooks.shellEpochNow ? { shellEpochNow: hooks.shellEpochNow } : {}),
           shellRevoked: (agentId) => hooks.openSessions?.isRevoked(agentId) ?? false,
           routesNewWork: (kind) => resolver.select(kind) === adapter,
           ...(hooks.bindHistoryDelayMs !== undefined ? { bindHistoryDelayMs: hooks.bindHistoryDelayMs } : {}),
@@ -212,14 +215,15 @@ export function createHerdrProvider(
                 if (closed) return;
                 const allowShell = parsed.data.allowShell === true;
                 if (allowShell && !adapter.shell) throw new Error(`${adapter.label} conversations cannot take shell input`);
-                if (allowShell && !(await hooks.shellAllowed?.().catch(() => false))) throw new Error("Shell input is turned off in the Herdr plugin settings; turn on \"Allow shell input\" there first");
+                const allowShellEpoch = allowShell ? await hooks.shellEpoch?.().catch(() => null) ?? null : null;
+                if (allowShell && allowShellEpoch === null) throw new Error("Shell input is turned off in the Herdr plugin settings; turn on \"Allow shell input\" there first");
                 const agent = (await (allowShell ? deps.listAgents(controller.signal, { includeShells: true }) : deps.listAgents(controller.signal))).find((candidate) => candidate.terminal_id === parsed.data.terminalId);
                 if (closed) return;
                 if (!agent) throw new Error(`The Herdr agent in terminal ${parsed.data.terminalId} is no longer running`);
                 if (allowShell && agent.agent) throw new Error(`Herdr detects ${agent.agent} in terminal ${parsed.data.terminalId}; shell input applies only to plain shell panes`);
                 // New binding: route by kind, so a specific adapter wins over this one even if it is the fallback.
                 if (resolver.select(agent.agent) !== adapter) throw new Error(`The Herdr agent in terminal ${parsed.data.terminalId} is not a ${adapter.label} agent`);
-                const binding = bindingOf(agent, adapter, deps.getHerdrSession?.() ?? null, { allowShell });
+                const binding = bindingOf(agent, adapter, deps.getHerdrSession?.() ?? null, { allowShell, ...(allowShellEpoch !== null ? { allowShellEpoch } : {}) });
                 if (sessions.has(input.sessionId)) throw new Error("Session already open");
                 const session = register(input.sessionId, binding, deps);
                 if (!session) return;

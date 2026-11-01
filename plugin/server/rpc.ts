@@ -43,8 +43,8 @@ export interface ManagementDeps {
   restart?: typeof restartAgent;
   /** Bound chats awaiting `herdr.chat.ready`. */
   boundSessions?: BoundSessions;
-  /** The plugin's `allowShell` setting; shell input can only be turned on while it is on. Absent = off. */
-  shellAllowed?: () => Promise<boolean>;
+  /** The plugin's `allowShell` gate: its enable epoch while the setting is on, else null. Shell input can only be turned on while it is open. Absent = closed. */
+  shellEpoch?: () => Promise<number | null>;
   /** Open conversations by Paseo agent id (`herdr.chat.allow-shell`). */
   openSessions?: OpenSessions;
   /** Environment the CLI would resolve its socket with; defaults to `process.env`. */
@@ -477,18 +477,20 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
 
   server.handle(herdrChatAllowShellRpc, async ({ agentId, enabled }) => {
     const sessions = deps.openSessions?.byAgentId(agentId) ?? [];
-    if (enabled && !(await deps.shellAllowed?.().catch(() => false))) {
+    const epoch = enabled ? await deps.shellEpoch?.().catch(() => null) ?? null : null;
+    if (enabled && epoch === null) {
       throw new Error("Shell input is turned off in the Herdr plugin settings; turn on \"Allow shell input\" there first.");
     }
     if (sessions.length === 0) {
-      // Not open: Paseo owns the stored flag and the plugin cannot rewrite it, so remember the revocation; the next open clears it.
       if (enabled) throw new Error("This conversation is not open in the Herdr plugin; open it in Paseo first.");
+      // Paseo owns the stored flag and the plugin cannot rewrite it, so remember the revocation; the next open of this agent id clears it.
       deps.openSessions?.revokeShell(agentId);
-      return { enabled, applied: false };
+      // Never `applied: false` here: that reads as "nothing to stop". A conversation that is open but has no `PASEO_AGENT_ID` in its env cannot be reached by id, and keeps typing.
+      throw new Error(`No open conversation in the Herdr plugin has Paseo agent id ${agentId}, so nothing was stopped now. If it is closed, it loses shell input when it is next opened; if it is open and still typing, turn off "Allow shell input" in the Herdr plugin settings.`);
     }
     if (enabled) deps.openSessions?.clearRevoked(agentId);
     let applied = false;
-    for (const session of sessions) applied = session.setAllowShell(enabled).applied || applied;
+    for (const session of sessions) applied = session.setAllowShell(enabled, epoch ?? undefined).applied || applied;
     return { enabled, applied };
   });
 

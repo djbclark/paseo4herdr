@@ -2,8 +2,8 @@ import type { HarnessAdapter, PromptDelivery, ShellSupport, TranscriptLocator, T
 import { PaneProcessInfoResultSchema, type PaneProcessInfo } from "../../herdr/schema.js";
 import { HerdrError } from "../../herdr/client.js";
 import { classifyHerdrPrompt } from "../../prompt.js";
-import { shellForeground, shellTextProblem } from "../../shell.js";
-import { processInstanceId } from "../process-identity.js";
+import { checkedShellForeground, shellTextProblem } from "../../shell.js";
+import { processGroupMembers, processInstanceId } from "../process-identity.js";
 import { openScreenReader, recordSubmittedPrompt } from "./screen.js";
 
 /**
@@ -44,33 +44,47 @@ const shellSupport: ShellSupport = {
   isShell: isShellProcess,
   interruptKeys: ["ctrl+c"],
   notice: "Prompt text runs as shell commands.",
-  submit: async (target, text, { signal, request, stillAllowed }): Promise<PromptDelivery> => {
+  groupMembers: (pgid) => processGroupMembers(pgid),
+  submit: async (target, text, { signal, request, stillAllowed, allowedNow }): Promise<PromptDelivery> => {
     const problem = shellTextProblem(text);
     if (problem) return { type: "rejected", message: problem };
     const refused = { type: "rejected", message: "Shell input was turned off; nothing was typed." } as const;
-    try {
-      const process = PaneProcessInfoResultSchema.parse(await request("pane.process_info", { pane_id: target.paneId }, { signal })).process_info;
-      if (process.shell_pid !== target.pid || shellForeground(shellSupport, process) !== "idle") {
-        return { type: "rejected", message: "The shell is not at an idle prompt; nothing was typed." };
-      }
-    } catch {
-      return { type: "rejected", message: "Paseo could not check that the shell is at an idle prompt; nothing was typed." };
-    }
-    // The last look before anything is written: the kill switch, the plugin setting and the session may have changed during the awaits above.
+    // The one async settings read comes first. From the foreground check to the last write only `allowedNow` (no I/O) is used,
+    // so the window in which the pane can change under us is as short as the requests themselves.
     if (!(await stillAllowed())) return refused;
+    /** Null when the shell is at an idle prompt right now: Herdr's own report and `ps` (which sees the root processes Herdr hides) agree. */
+    const notIdle = async (): Promise<PromptDelivery | null> => {
+      try {
+        const process = PaneProcessInfoResultSchema.parse(await request("pane.process_info", { pane_id: target.paneId }, { signal })).process_info;
+        if (process.shell_pid !== target.pid || (await checkedShellForeground(shellSupport, process)) !== "idle") {
+          return { type: "rejected", message: "The shell is not at an idle prompt; nothing was typed." };
+        }
+      } catch {
+        return { type: "rejected", message: "Paseo could not check that the shell is at an idle prompt; nothing was typed." };
+      }
+      return null;
+    };
+    const beforeClear = await notIdle();
+    if (beforeClear) return beforeClear;
+    if (!allowedNow()) return refused;
     // Anything left in the line editor (an earlier half-typed line) would be glued to this prompt and run with it.
     try {
       await request("pane.send_keys", { pane_id: target.paneId, keys: CLEAR_LINE_KEYS }, { signal });
     } catch (error) {
       return { type: "rejected", message: `Paseo could not clear the shell's command line, so nothing was typed (${error instanceof Error ? error.message : String(error)})` };
     }
-    if (!(await stillAllowed())) return refused;
+    // The clear keys may have reached a program the user started meanwhile: look again before typing a prompt into it.
+    const afterClear = await notIdle();
+    if (afterClear) return afterClear;
+    if (!allowedNow()) return refused;
     try {
       await request("pane.send_text", { pane_id: target.paneId, text }, { signal });
     } catch (error) {
       if (error instanceof HerdrError && Object.hasOwn(BEFORE_WRITE, error.code)) return { type: "rejected", message: error.message };
       return { type: "uncertain", message: `Typing the command may have partly reached the shell (${error instanceof Error ? error.message : String(error)})` };
     }
+    // A switch that landed while the text was in flight: leave the text on the line for the user to see, never press Enter.
+    if (!allowedNow()) return { type: "uncertain", message: "Shell input was turned off while the command was being typed; Enter was not pressed and the text may still be on the command line" };
     try {
       await request("pane.send_keys", { pane_id: target.paneId, keys: ["enter"] }, { signal });
     } catch (error) {
