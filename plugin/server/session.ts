@@ -3,6 +3,7 @@ import type { HarnessAdapter, PaneObservation, RestoredPromptOutcome, Transcript
 import { adapterAcceptsKind } from "./harness/resolve.js";
 import { PaneProcessInfoResultSchema, type AgentInfo, type AgentStatus, type PaneProcessInfo, type PaneProcessInfoResult } from "./herdr/schema.js";
 import { checkedShellForeground, type ShellForeground } from "./shell.js";
+import type { ShellGate } from "../shared/settings.js";
 import type { HerdrSubscription, SubscriptionDescriptor } from "./herdr/client.js";
 import { persistenceOf, sameRef, sessionRefOf, type Binding } from "./binding.js";
 import { emptyTimelineState, seedTimeline, type TimelineRow } from "./timeline.js";
@@ -44,13 +45,14 @@ export interface SessionDeps {
   getPaseo?: () => PermissionResponder | null;
   /**
    * Plugin-wide gate for shell input (the `allowShell` plugin setting, default off): the enable epoch the settings UI
-   * stored when it last turned the setting on, or null while the gate is closed (setting off, no epoch, read failure).
-   * Absent = closed. A binding is flag-off unless it opted in under exactly this epoch, so turning the setting off and on
-   * again re-arms nothing. Read fresh on each validation and before each shell write.
+   * stored when it last moved the switch on, or null while the gate is closed (setting off, or on without the UI's epoch).
+   * Absent = closed. Rejects when the setting cannot be read, which refuses input but never revokes an opt-in. A binding is
+   * flag-off unless it opted in under exactly this epoch, so turning the setting off and on again re-arms nothing. Read
+   * fresh on each validation and before each shell write.
    */
   shellEpoch?: () => Promise<number | null>;
-  /** Synchronous view of the same gate, kept current by the settings subscription and by every `shellEpoch` read; null = closed or unknown. Checked between the last foreground look and each write, where no I/O is allowed. */
-  shellEpochNow?: () => number | null;
+  /** Synchronous view of the same gate, kept current by the settings subscription and by every `shellEpoch` read; `"unknown"` = not read yet or unreadable. Checked between the last foreground look and each write, where no I/O is allowed. */
+  shellEpochNow?: () => ShellGate;
   /** A management RPC turned shell input off for this Paseo agent while its conversation was closed; applied (and cleared) at open. */
   shellRevoked?: (agentId: string) => boolean;
   /** Tests: replaces the real timer between approval polls. Must resolve on abort. */
@@ -420,12 +422,25 @@ export class HerdrHarnessSession {
     return was;
   }
 
-  /** The enable epoch of the open gate, or null: revoked while closed, the plugin setting is off or has no epoch, or it could not be read. */
-  private async shellEpoch(): Promise<number | null> {
+  /** The gate as read now: null when revoked while the conversation was closed or the setting is off or has no epoch, `"unknown"` when the setting could not be read. */
+  private async shellGate(): Promise<ShellGate> {
     const agentId = this.paseoAgentId;
     if (agentId && this.deps.shellRevoked?.(agentId)) return null;
-    try { return (await this.deps.shellEpoch?.()) ?? null; } catch { return null; }
+    try { return (await this.deps.shellEpoch?.()) ?? null; } catch { return "unknown"; }
   }
+
+  /**
+   * What a gate reading means for this binding. A binding is armed only by the epoch it opted in under; a missing epoch on
+   * either side is flag-off. `revoke`: the setting was read and is off or holds another epoch. `unknown`: it could not be read
+   * (or not yet): input is refused, but the opt-in is kept, because a failed read says nothing about the setting.
+   */
+  private gateVerdict(gate: ShellGate): "open" | "revoke" | "unknown" {
+    if (gate === "unknown") return "unknown";
+    return gate !== null && this.state.binding.allowShellEpoch === gate ? "open" : "revoke";
+  }
+
+  /** True while the last validation could not read the plugin setting: shell input is refused, but it was not turned off and no opt-in was forgotten. */
+  shellSettingUnreadable = false;
 
   /** Cut the shell opt-in off for good: forget the persisted flag and its epoch (turning the setting back on re-arms nothing) and freeze. */
   private revokeShell(): void {
@@ -438,30 +453,30 @@ export class HerdrHarnessSession {
     if (binding.occupant?.shell) this.freeze("Shell input is turned off", "Shell input is turned off in the Herdr plugin settings; no input will be sent to the shell.");
   }
 
+  /** The conversation is the one that admitted the prompt and its flag is still on. The kill switch and every revocation clear the flag and bump the generation synchronously, so this sees them. */
+  private shellFlagOn(generation: number): boolean {
+    return this.current(generation) && this.state.outcome === "active" && this.state.binding.allowShell === true;
+  }
+
   /**
-   * Synchronous last look before a shell write, no I/O: the conversation is the one that admitted the prompt and its flag
-   * is still on and the cached plugin setting still holds its epoch. The kill switch and every revocation clear the flag and bump the generation synchronously, so this sees them.
+   * Synchronous last look before a shell write, no I/O: {@link shellFlagOn} and the cached plugin setting still holds the
+   * binding's epoch. A closed or foreign epoch revokes; an unreadable (or not yet read) setting only refuses.
    */
   shellAllowedNow(generation: number): boolean {
-    if (!(this.current(generation) && this.state.outcome === "active" && this.state.binding.allowShell === true)) return false;
+    if (!this.shellFlagOn(generation)) return false;
     const cached = this.deps.shellEpochNow;
-    if (cached && !this.epochMatches(cached())) { this.revokeShell(); return false; }
-    return true;
+    if (!cached) return true;
+    const verdict = this.gateVerdict(cached());
+    if (verdict === "revoke") this.revokeShell();
+    return verdict === "open";
   }
 
   /** Async check before the first shell write: a fresh read of the plugin setting says the binding's opt-in is still valid, then {@link shellAllowedNow}. */
   async shellStillAllowed(generation: number): Promise<boolean> {
-    if (!this.shellAllowedNow(generation)) return false;
-    if (!this.epochMatches(await this.shellEpoch())) {
-      if (this.current(generation)) this.revokeShell();
-      return false;
-    }
-    return this.shellAllowedNow(generation);
-  }
-
-  /** A binding is armed only by the epoch it opted in under; a missing epoch on either side is flag-off. */
-  private epochMatches(epoch: number | null): boolean {
-    return epoch !== null && this.state.binding.allowShellEpoch === epoch;
+    if (!this.shellFlagOn(generation)) return false;
+    const verdict = this.gateVerdict(await this.shellGate());
+    if (verdict === "revoke" && this.current(generation)) this.revokeShell();
+    return verdict === "open" && this.shellAllowedNow(generation);
   }
 
   /** Refresh terminal, native session, foreground leader and process-local nonce. */
@@ -469,10 +484,16 @@ export class HerdrHarnessSession {
     const generation = this.state.generation;
     // The plugin setting is the global kill switch: closed, every binding counts as flag-off, persisted ones included. A
     // persisted flag with no epoch (stored before epochs existed) or an epoch the setting no longer holds is flag-off too.
-    if (this.state.binding.allowShell && this.adapter.shell && !this.epochMatches(await this.shellEpoch())) {
-      if (!this.current(generation)) return null;
-      this.revokeShell();
+    let settingUnreadable = false;
+    if (this.state.binding.allowShell && this.adapter.shell) {
+      const verdict = this.gateVerdict(await this.shellGate());
+      if (verdict === "revoke") {
+        if (!this.current(generation)) return null;
+        this.revokeShell();
+      }
+      settingUnreadable = verdict === "unknown";
     }
+    this.shellSettingUnreadable = settingUnreadable;
     // Only a binding that opted in lists plain shell panes; everything else sees `agent.list` exactly as it always did.
     const shell = this.state.binding.allowShell && this.adapter.shell ? this.adapter.shell : null;
     if (this.state.binding.occupant?.shell && !shell) {
@@ -533,6 +554,8 @@ export class HerdrHarnessSession {
       this.state.tracker.observeConnectivityLost();
       return null;
     }
+    // The plugin setting could not be read: nothing is committed or ended, prompts are refused, and the opt-in is kept.
+    if (shell && settingUnreadable) return this.shellUnknown(agent, seq);
     // A shell binding (or a first validation that finds an idle shell under the flag) takes the shell path; anything else is the agent path.
     const firstForeground = shell && !binding.occupant ? await checkedShellForeground(shell, process) : null;
     if (firstForeground !== null && (!this.current(generation) || this.state.outcome !== "active")) return null;

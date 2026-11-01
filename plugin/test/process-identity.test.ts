@@ -131,3 +131,64 @@ describe("processGroupMembers", () => {
     await expect(processGroupMembers(0, psDeps(listing).deps)).rejects.toThrow(/invalid process group/);
   });
 });
+
+describe("processGroupMembers on linux (/proc scan, no ps)", () => {
+  /** A stat line: `pid (comm) S ppid pgrp ...`, enough fields to parse. */
+  const procStat = (pid: number, pgrp: number, comm = "bash") => `${pid} (${comm}) S 1 ${pgrp} 1 0 -1 4194560 0 0 0 0\n`;
+  const fakeProc = (entries: Record<string, string | Error>, extra: string[] = []) => {
+    const readdir = vi.fn<ProcessIdentityDeps["readdir"]>(async () => [...Object.keys(entries), ...extra]);
+    const readFile = vi.fn<ProcessIdentityDeps["readFile"]>(async (path) => {
+      const match = /^\/proc\/(\d+)\/stat$/.exec(path);
+      const entry = match ? entries[match[1]!] : undefined;
+      if (entry === undefined) throw Object.assign(new Error(`ENOENT ${path}`), { code: "ENOENT" });
+      if (entry instanceof Error) throw entry;
+      return entry;
+    });
+    const execFile = vi.fn<ProcessIdentityDeps["execFile"]>(async () => ({ stdout: "unused" }));
+    return { readdir, readFile, execFile, deps: { readdir, readFile, execFile, platform: "linux" as const } };
+  };
+
+  it("lists the members of the group from field 5 of every numeric /proc entry, root included, and never runs ps", async () => {
+    const { readdir, execFile, deps } = fakeProc({ "1": procStat(1, 1), "100": procStat(100, 100), "200": procStat(200, 100, "sudo"), "300": procStat(300, 300) }, ["self", "cpuinfo", "sys", "0", "007x"]);
+    expect(await processGroupMembers(100, deps)).toEqual([100, 200]);
+    expect(readdir.mock.calls[0]![0]).toBe("/proc");
+    expect(execFile).not.toHaveBeenCalled();
+  });
+
+  it("parses past a comm holding spaces and parentheses, so its text cannot shift the pgrp field", async () => {
+    const { deps } = fakeProc({ "100": procStat(100, 100), "200": procStat(200, 777, "x) S 1 100 (y") });
+    expect(await processGroupMembers(100, deps)).toEqual([100]);
+  });
+
+  it("returns a lone member, and nothing for a group no process holds", async () => {
+    const entries = { "100": procStat(100, 100), "300": procStat(300, 300) };
+    expect(await processGroupMembers(300, fakeProc(entries).deps)).toEqual([300]);
+    expect(await processGroupMembers(999, fakeProc(entries).deps)).toEqual([]);
+  });
+
+  it("skips a pid that vanished between the listing and the read (ENOENT, ESRCH)", async () => {
+    const { deps } = fakeProc({ "100": procStat(100, 100), "150": Object.assign(new Error("gone"), { code: "ESRCH" }), "200": procStat(200, 100) }, ["777"]);
+    expect(await processGroupMembers(100, deps)).toEqual([100, 200]);
+  });
+
+  it("throws on any other read error, so a member it could not read is never taken as absent", async () => {
+    const { deps } = fakeProc({ "100": procStat(100, 100), "200": Object.assign(new Error("EACCES"), { code: "EACCES" }) });
+    await expect(processGroupMembers(100, deps)).rejects.toThrow(/EACCES/);
+  });
+
+  it("throws when /proc cannot be listed, is empty, or holds a malformed stat", async () => {
+    const unlistable = { readdir: async () => { throw new Error("EMFILE"); }, readFile: async () => "", execFile: async () => ({ stdout: "" }), platform: "linux" as const };
+    await expect(processGroupMembers(100, unlistable)).rejects.toThrow(/EMFILE/);
+    await expect(processGroupMembers(100, fakeProc({}, ["self"]).deps)).rejects.toThrow(/no processes/);
+    await expect(processGroupMembers(100, fakeProc({ "100": procStat(100, 100), "200": "200 (bash) S 1\n" }).deps)).rejects.toThrow(/malformed/);
+    await expect(processGroupMembers(100, fakeProc({ "100": "garbage" }).deps)).rejects.toThrow(/malformed/);
+    await expect(processGroupMembers(100, fakeProc({ "100": "" }).deps)).rejects.toThrow(/malformed/);
+  });
+
+  it("the macOS path still runs ps, never /proc", async () => {
+    const readdir = vi.fn<ProcessIdentityDeps["readdir"]>(async () => ["100"]);
+    const { execFile } = psDeps("  100   100\n");
+    expect(await processGroupMembers(100, { execFile, readdir, platform: "darwin" })).toEqual([100]);
+    expect(readdir).not.toHaveBeenCalled();
+  });
+});

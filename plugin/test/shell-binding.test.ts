@@ -44,8 +44,8 @@ afterEach(() => { for (const session of sessions.splice(0)) session.close(); vi.
 
 /** One Herdr stand-in: a plain shell pane that only `listAgents({includeShells})` can see, a mutable foreground and a request log. */
 /** `bindingEpoch`: the epoch the persisted flag opted in under (null = none stored); `settingEpoch`: the epoch the plugin setting holds now. */
-async function world(options: { allowShell?: boolean; setting?: boolean; revoked?: boolean; process?: PaneProcessInfo; env?: Record<string, string>; bindingEpoch?: number | null; settingEpoch?: number } = {}) {
-  const state = { setting: options.setting ?? true, epoch: options.settingEpoch ?? EPOCH, holdText: null as Promise<void> | null, onClear: null as (() => void) | null, holdRead: null as Promise<void> | null, holdInfo: null as { nth: number; promise: Promise<void>; seen: number } | null, process: options.process ?? idle(), sendText: null as Error | null, sendKeys: null as Error | null, clearKeys: null as Error | null, processInfo: null as Error | null };
+async function world(options: { allowShell?: boolean; setting?: boolean; unreadable?: boolean; revoked?: boolean; process?: PaneProcessInfo; env?: Record<string, string>; bindingEpoch?: number | null; settingEpoch?: number } = {}) {
+  const state = { setting: options.setting ?? true, unreadable: options.unreadable ?? false, epoch: options.settingEpoch ?? EPOCH, holdText: null as Promise<void> | null, onClear: null as (() => void) | null, holdRead: null as Promise<void> | null, holdInfo: null as { nth: number; promise: Promise<void>; seen: number } | null, process: options.process ?? idle(), sendText: null as Error | null, sendKeys: null as Error | null, clearKeys: null as Error | null, processInfo: null as Error | null };
   const log: Array<{ method: string; params?: Record<string, unknown> }> = [];
   const listCalls: Array<{ includeShells?: boolean } | undefined> = [];
   const events: ProviderEvent[] = [];
@@ -76,8 +76,8 @@ async function world(options: { allowShell?: boolean; setting?: boolean; revoked
     request,
     subscribe: async () => ({ [Symbol.asyncIterator]: async function* () {}, close() {} }),
     emit: (event) => events.push(event),
-    shellEpoch: async () => state.setting ? state.epoch : null,
-    shellEpochNow: () => state.setting ? state.epoch : null,
+    shellEpoch: async () => { if (state.unreadable) throw new Error("EIO: settings unreadable"); return state.setting ? state.epoch : null; },
+    shellEpochNow: () => state.unreadable ? "unknown" : state.setting ? state.epoch : null,
     shellRevoked: () => options.revoked === true,
   });
   sessions.push(session);
@@ -834,6 +834,109 @@ describe("round 3: process group, argv, epoch, ordering", () => {
       openSessions.add(blocked.session);
       await handlers.get(herdrChatAllowShellRpc.name)!({ agentId: "agent-f", enabled: true } as never, {} as never);
       expect(blocked.session.state.binding.allowShellEpoch).toBe(41);
+    });
+  });
+
+  describe("the setting cannot be read: refuse, never revoke", () => {
+    /** True when any persisted snapshot of the binding no longer carries the opt-in. */
+    const flagDropped = (events: ProviderEvent[]) => events.some((e) => e.type === "session.persistence" && !("allowShell" in (e.persistence.data as Record<string, unknown>)));
+
+    it("at open: the chat stays active with its flag and epoch kept, status is unknown, prompts are refused with a message that does not blame the setting, nothing typed", async () => {
+      const { session, writes, events } = await world({ allowShell: true, unreadable: true });
+      expect(session.state.outcome).toBe("active");
+      expect(session.state.binding).toMatchObject({ allowShell: true, allowShellEpoch: EPOCH });
+      expect(session.state.status).toBe("unknown");
+      await session.prompt(prompt("p1"));
+      expect(promptResults(events)).toEqual(["p1:failed"]);
+      const failure = events.find((e) => e.type === "session.prompt_result" && e.result.type === "failed");
+      const message = failure && failure.type === "session.prompt_result" && failure.result.type === "failed" ? failure.result.error.message : "";
+      expect(message).toMatch(/could not be read/);
+      expect(message).not.toMatch(/turned off in/i);
+      expect(writes()).toEqual([]);
+      expect(noticeTitles(events)).not.toContain("Shell input is turned off");
+      expect(flagDropped(events)).toBe(false); // nothing persisted while the setting was unreadable forgets the opt-in
+    });
+
+    it("a transient read failure does not delete a persisted flag: after it clears, the same chat types again", async () => {
+      const { session, state, writes, events, advance } = await world({ allowShell: true });
+      state.unreadable = true;
+      await session.live.reconcile();
+      await session.prompt(prompt("p1", "ls"));
+      expect(writes()).toEqual([]);
+      expect(session.state.outcome).toBe("active");
+      expect(session.state.binding).toMatchObject({ allowShell: true, allowShellEpoch: EPOCH });
+      expect(parseBinding(persistenceOf(session.state.binding), genericAdapter)).toMatchObject({ allowShell: true, allowShellEpoch: EPOCH });
+      expect(flagDropped(events)).toBe(false);
+      state.unreadable = false;
+      advance(5_000);
+      await session.live.reconcile();
+      await session.prompt(prompt("p2", "ls"));
+      expect(sentKeys(writes())).toContain("text:ls");
+    });
+
+    it("a read and closed setting still revokes (the other branch of the tri-state)", async () => {
+      const { session, state } = await world({ allowShell: true });
+      state.unreadable = true;
+      await session.live.reconcile();
+      expect(session.state.binding.allowShell).toBe(true);
+      state.unreadable = false;
+      state.setting = false;
+      await session.live.reconcile();
+      expect(session.state.binding.allowShell).toBeUndefined();
+      expect(session.state.outcome).toBe("readonly");
+    });
+
+    it("a cache that is unset or unreadable at a pre-write check refuses without revoking", async () => {
+      const { session, state, writes } = await world({ allowShell: true });
+      const generation = session.state.generation;
+      expect(session.shellAllowedNow(generation)).toBe(true);
+      state.unreadable = true;
+      expect(session.shellAllowedNow(generation)).toBe(false);
+      expect(session.state.binding).toMatchObject({ allowShell: true, allowShellEpoch: EPOCH });
+      expect(session.state.outcome).toBe("active");
+      expect(await session.shellStillAllowed(generation)).toBe(false);
+      expect(session.state.binding.allowShell).toBe(true);
+      state.unreadable = false;
+      expect(await session.shellStillAllowed(generation)).toBe(true);
+      expect(writes()).toEqual([]);
+    });
+
+    it("the cache going unknown while the text is in flight stops Enter: text left on the line, flag kept", async () => {
+      const { session, state, writes } = await world({ allowShell: true });
+      const hold = deferred();
+      state.holdText = hold.promise;
+      const running = session.prompt(prompt("p1", "ls"));
+      await vi.waitFor(() => expect(writes().some((entry) => entry.method === "pane.send_text")).toBe(true));
+      state.unreadable = true;
+      hold.release();
+      await running;
+      expect(sentKeys(writes())).not.toContain("keys:enter");
+      expect(session.shellUncertain).toBe(true);
+      expect(session.state.binding).toMatchObject({ allowShell: true, allowShellEpoch: EPOCH });
+    });
+
+    it("unreadable during the pre-write process lookup: nothing is written and the flag is kept", async () => {
+      const { session, state, writes } = await world({ allowShell: true });
+      const hold = deferred();
+      state.holdInfo = { nth: 2, promise: hold.promise, seen: 0 };
+      const running = session.prompt(prompt("p1"));
+      await vi.waitFor(() => expect(state.holdInfo?.seen).toBeGreaterThanOrEqual(2));
+      state.unreadable = true;
+      hold.release();
+      await running;
+      expect(writes()).toEqual([]);
+      expect(session.state.binding.allowShell).toBe(true);
+      expect(session.state.outcome).toBe("active");
+    });
+
+    it("herdr.chat.allow-shell enabled:true says the setting could not be read, not that it is off", async () => {
+      const handlers = new Map<string, (input: never, context: never) => Promise<unknown>>();
+      registerManagementRpcs({ handle: ((rpc: { name: string }, fn: never) => { handlers.set(rpc.name, fn); }) as never },
+        { readTarget: async () => { throw new Error("unused"); }, shellEpoch: async () => { throw new Error("EIO"); }, ensureReady: async () => { throw new Error("unused"); }, harnesses: [genericAdapter], openSessions: new OpenSessions(),
+          companionStatus: async () => ({ state: "current", path: "/x" }) });
+      const call = handlers.get(herdrChatAllowShellRpc.name)!({ agentId: "a", enabled: true } as never, {} as never);
+      await expect(call).rejects.toThrow(/could not be read/);
+      await expect(handlers.get(herdrChatAllowShellRpc.name)!({ agentId: "a", enabled: true } as never, {} as never)).rejects.not.toThrow(/turned off/);
     });
   });
 

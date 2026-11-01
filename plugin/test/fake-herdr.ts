@@ -44,6 +44,9 @@ export class FakeHerdr {
     const server = createServer((stream) => {
       let buffer = "";
       stream.setEncoding("utf8");
+      // A client that aborts or times out under load closes first; the reply write then fails with EPIPE/ECONNRESET.
+      // Without a listener that is an uncaught exception that fails an unrelated test.
+      stream.on("error", () => {});
       stream.on("data", (chunk: string) => {
         buffer += chunk;
         const newline = buffer.indexOf("\n");

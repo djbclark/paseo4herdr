@@ -477,9 +477,12 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
 
   server.handle(herdrChatAllowShellRpc, async ({ agentId, enabled }) => {
     const sessions = deps.openSessions?.byAgentId(agentId) ?? [];
-    const epoch = enabled ? await deps.shellEpoch?.().catch(() => null) ?? null : null;
-    if (enabled && epoch === null) {
-      throw new Error("Shell input is turned off in the Herdr plugin settings; turn on \"Allow shell input\" there first.");
+    let epoch: number | null = null;
+    if (enabled) {
+      try { epoch = (await deps.shellEpoch?.()) ?? null; } catch (error) {
+        throw new Error(`The Herdr plugin settings could not be read, so shell input was not turned on (${error instanceof Error ? error.message : String(error)}); try again.`);
+      }
+      if (epoch === null) throw new Error("Shell input is turned off in the Herdr plugin settings; turn on \"Allow shell input\" there first.");
     }
     if (sessions.length === 0) {
       if (enabled) throw new Error("This conversation is not open in the Herdr plugin; open it in Paseo first.");

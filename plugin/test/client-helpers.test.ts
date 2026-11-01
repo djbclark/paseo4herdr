@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { shellGateEpoch } from "../shared/settings.js";
 import { withShellSwitch, archiveDuplicatesLabel, archiveFailureMessage, companionBanner, duplicateArchiveSkippedMessage, duplicateChatsToArchive, freshDuplicatesToArchive, folderFieldValue, needsHomeExpansion, agentLabel, describeTarget, pathTail, statusLabel, statusTone, validateFolder } from "../client/helpers.js";
 
 describe("withShellSwitch", () => {
@@ -7,9 +8,25 @@ describe("withShellSwitch", () => {
     const first = withShellSwitch(base, true, 1000);
     expect(first).toEqual({ herdrSession: "s", allowShell: true, allowShellEpoch: 1000 });
     const off = withShellSwitch(first, false, 2000);
-    expect(off).toEqual({ herdrSession: "s", allowShell: false, allowShellEpoch: 1000 });
+    expect(off.allowShell).toBe(false);
     expect(withShellSwitch(off, true, 3000).allowShellEpoch).toBe(3000);
-    expect(withShellSwitch(off, true, 1000).allowShellEpoch).toBe(1001); // same clock reading: still a different epoch
+    expect(withShellSwitch(off, true, 1000).allowShellEpoch).toBe(2001); // same clock reading: still a different epoch
+  });
+
+  it("the off-save stores a new epoch too, so a later write that only flips the boolean to true matches no binding's epoch", () => {
+    const on = withShellSwitch(base, true, 1000);
+    const bindingEpoch = shellGateEpoch(on); // a chat opts in under this epoch, then is closed
+    const off = withShellSwitch(on, false, 2000);
+    expect(off.allowShellEpoch).toBe(2000);
+    expect(shellGateEpoch(off)).toBeNull();
+    const flipped = { ...off, allowShell: true }; // e.g. a generic plugin-settings write that changes only the boolean
+    expect(shellGateEpoch(flipped)).not.toBeNull();
+    expect(shellGateEpoch(flipped)).not.toBe(bindingEpoch);
+  });
+
+  it("a repeated clock reading on the off move still advances the epoch", () => {
+    const on = withShellSwitch(base, true, 1000);
+    expect(withShellSwitch(on, false, 1000).allowShellEpoch).toBe(1001);
   });
 });
 

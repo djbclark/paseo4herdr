@@ -48,7 +48,7 @@ const shellSupport: ShellSupport = {
   submit: async (target, text, { signal, request, stillAllowed, allowedNow }): Promise<PromptDelivery> => {
     const problem = shellTextProblem(text);
     if (problem) return { type: "rejected", message: problem };
-    const refused = { type: "rejected", message: "Shell input was turned off; nothing was typed." } as const;
+    const refused = { type: "rejected", message: "Shell input was turned off or the plugin setting could not be read just now; nothing was typed." } as const;
     // The one async settings read comes first. From the foreground check to the last write only `allowedNow` (no I/O) is used,
     // so the window in which the pane can change under us is as short as the requests themselves.
     if (!(await stillAllowed())) return refused;
@@ -84,7 +84,7 @@ const shellSupport: ShellSupport = {
       return { type: "uncertain", message: `Typing the command may have partly reached the shell (${error instanceof Error ? error.message : String(error)})` };
     }
     // A switch that landed while the text was in flight: leave the text on the line for the user to see, never press Enter.
-    if (!allowedNow()) return { type: "uncertain", message: "Shell input was turned off while the command was being typed; Enter was not pressed and the text may still be on the command line" };
+    if (!allowedNow()) return { type: "uncertain", message: "Shell input was turned off, or the plugin setting could not be read, while the command was being typed; Enter was not pressed and the text may still be on the command line" };
     try {
       await request("pane.send_keys", { pane_id: target.paneId, keys: ["enter"] }, { signal });
     } catch (error) {

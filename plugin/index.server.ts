@@ -8,7 +8,8 @@ import { companionInstallStatus } from "./server/harness/omp/companion-install.j
 import { BoundSessions, OpenSessions } from "./server/bound-sessions.js";
 import { TargetReadiness, defaultTargetReadinessDeps, resolveTarget } from "./server/herdr/target.js";
 import { PaseoHost } from "./server/host.js";
-import { herdrSettings, shellGateEpoch } from "./shared/settings.js";
+import { herdrSettings } from "./shared/settings.js";
+import { createShellEpochCache } from "./server/shell-epoch-cache.js";
 
 export default function contribute(server: PluginServerContext) {
   const settings = server.registerSettings(herdrSettings);
@@ -24,17 +25,10 @@ export default function contribute(server: PluginServerContext) {
     if (state.status === "invalid") throw new Error(state.error);
     return state.values;
   };
-  // The enable epoch of the shell gate: the settings UI stores a new one each time it turns "Allow shell input" on. A setting
+  // The enable epoch of the shell gate: the settings UI stores a new one on every move of "Allow shell input". A setting
   // that is on with no epoch (written before epochs, or by something other than the UI switch) keeps the gate closed.
-  // Synchronous view for the checks between the last foreground look and a write, where no I/O is allowed. Closed until read;
-  // fed by the settings subscription and by every async read, and an unreadable setting closes it.
-  let cachedEpoch: number | null = null;
-  const shellEpoch = async (): Promise<number | null> => {
-    try { cachedEpoch = shellGateEpoch(await readSettings()); } catch (error) { cachedEpoch = null; throw error; }
-    return cachedEpoch;
-  };
-  const shellEpochNow = () => cachedEpoch;
-  const stopWatching = settings.subscribe((state) => { cachedEpoch = state.status === "ready" ? shellGateEpoch(state.values) : null; });
+  // The cache is the synchronous view for the checks between the last foreground look and a write, where no I/O is allowed.
+  const shellGate = createShellEpochCache(settings);
   const readTarget = async () => {
     const values = await readSettings();
     return { target: resolveTarget(values, env), ompEnabled: values.enableOmp, enabled: (adapterId: string) => harnessEnabled(values, adapterId) };
@@ -59,14 +53,14 @@ export default function contribute(server: PluginServerContext) {
     server.registerProvider(createHerdrProvider(adapter, socketPath, {
       getHerdrSession: () => herdrSession,
       isEnabled: async () => harnessEnabled(await readSettings(), adapter.id),
-      shellEpoch,
-      shellEpochNow,
+      shellEpoch: shellGate.read,
+      shellEpochNow: shellGate.now,
       resolver,
       boundSessions,
       openSessions,
       getPaseo: () => host.get(),
     }));
   }
-  registerManagementRpcs(server, { readTarget, shellEpoch, ensureReady: (target) => readiness.ensureReady(target), harnesses, boundSessions, openSessions, resolver, companionStatus: () => companionInstallStatus() });
-  return () => { stopWatching(); };
+  registerManagementRpcs(server, { readTarget, shellEpoch: shellGate.read, ensureReady: (target) => readiness.ensureReady(target), harnesses, boundSessions, openSessions, resolver, companionStatus: () => companionInstallStatus() });
+  return () => { shellGate.stop(); };
 }

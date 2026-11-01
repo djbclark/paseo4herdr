@@ -72,6 +72,10 @@ export class PromptController {
         if (!session.isAborted) fail("The bound native agent is unavailable; input was not sent");
         return;
       }
+      if (state.binding.allowShell && session.shellSettingUnreadable) {
+        fail("Shell input is unavailable right now: the Herdr plugin settings could not be read. It was not turned off. Nothing was typed; try again.");
+        return;
+      }
       await session.live.readTranscript();
       if (!session.current(generation) || !state.connected) {
         if (!session.isAborted) fail("The conversation changed before delivery; input was not sent");
