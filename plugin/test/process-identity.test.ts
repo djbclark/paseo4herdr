@@ -132,12 +132,21 @@ describe("processGroupMembers", () => {
   });
 });
 
+/** A typical mountinfo: a proc mount at /proc with default options, plus unrelated mounts. */
+const NORMAL_MOUNTINFO = [
+  "25 1 8:1 / / rw,relatime shared:1 - ext4 /dev/sda1 rw",
+  "30 25 0:6 / /proc rw,nosuid,nodev,noexec,relatime shared:12 - proc proc rw",
+  "31 25 0:7 / /sys rw,nosuid shared:13 - sysfs sysfs rw",
+].join("\n") + "\n";
+const procMount = (superOptions: string) => NORMAL_MOUNTINFO.replace("- proc proc rw", `- proc proc ${superOptions}`);
+
 describe("processGroupMembers on linux (/proc scan, no ps)", () => {
   /** A stat line: `pid (comm) S ppid pgrp ...`, enough fields to parse. */
   const procStat = (pid: number, pgrp: number, comm = "bash") => `${pid} (${comm}) S 1 ${pgrp} 1 0 -1 4194560 0 0 0 0\n`;
-  const fakeProc = (entries: Record<string, string | Error>, extra: string[] = []) => {
+  const fakeProc = (entries: Record<string, string | Error>, extra: string[] = [], mountinfo = NORMAL_MOUNTINFO) => {
     const readdir = vi.fn<ProcessIdentityDeps["readdir"]>(async () => [...Object.keys(entries), ...extra]);
     const readFile = vi.fn<ProcessIdentityDeps["readFile"]>(async (path) => {
+      if (path === "/proc/self/mountinfo") return mountinfo;
       const match = /^\/proc\/(\d+)\/stat$/.exec(path);
       const entry = match ? entries[match[1]!] : undefined;
       if (entry === undefined) throw Object.assign(new Error(`ENOENT ${path}`), { code: "ENOENT" });
@@ -177,12 +186,65 @@ describe("processGroupMembers on linux (/proc scan, no ps)", () => {
   });
 
   it("throws when /proc cannot be listed, is empty, or holds a malformed stat", async () => {
-    const unlistable = { readdir: async () => { throw new Error("EMFILE"); }, readFile: async () => "", execFile: async () => ({ stdout: "" }), platform: "linux" as const };
+    const unlistable = { readdir: async () => { throw new Error("EMFILE"); }, readFile: async () => NORMAL_MOUNTINFO, execFile: async () => ({ stdout: "" }), platform: "linux" as const };
     await expect(processGroupMembers(100, unlistable)).rejects.toThrow(/EMFILE/);
     await expect(processGroupMembers(100, fakeProc({}, ["self"]).deps)).rejects.toThrow(/no processes/);
     await expect(processGroupMembers(100, fakeProc({ "100": procStat(100, 100), "200": "200 (bash) S 1\n" }).deps)).rejects.toThrow(/malformed/);
     await expect(processGroupMembers(100, fakeProc({ "100": "garbage" }).deps)).rejects.toThrow(/malformed/);
     await expect(processGroupMembers(100, fakeProc({ "100": "" }).deps)).rejects.toThrow(/malformed/);
+  });
+
+  it("refuses a /proc mounted with hidepid (other than 0/off) or subset=pid, before scanning anything", async () => {
+    const entries = { "100": procStat(100, 100) };
+    for (const options of ["rw,hidepid=2", "rw,hidepid=invisible", "rw,hidepid=1", "rw,hidepid=noaccess", "rw,hidepid=4,gid=1000", "rw,subset=pid", "rw,hidepid=0,subset=pid"]) {
+      const { readdir, deps } = fakeProc(entries, [], procMount(options));
+      await expect(processGroupMembers(100, deps), options).rejects.toThrow(/\/proc is mounted with/);
+      expect(readdir).not.toHaveBeenCalled();
+    }
+    // The option can also sit in the per-mount options, and an overmounted /proc is checked as well.
+    const perMount = NORMAL_MOUNTINFO.replace("/proc rw,nosuid", "/proc rw,hidepid=2,nosuid");
+    await expect(processGroupMembers(100, fakeProc(entries, [], perMount).deps)).rejects.toThrow(/hidepid=2/);
+    const overmount = NORMAL_MOUNTINFO + "40 30 0:8 / /proc rw shared:14 - proc proc rw,hidepid=2\n";
+    await expect(processGroupMembers(100, fakeProc(entries, [], overmount).deps)).rejects.toThrow(/hidepid=2/);
+  });
+
+  it("scans a normal /proc mount, including hidepid=0 and hidepid=off", async () => {
+    const entries = { "100": procStat(100, 100), "200": procStat(200, 100) };
+    for (const options of ["rw", "rw,hidepid=0", "rw,hidepid=off", "rw,hidepid=0,gid=1000,subset=all"]) {
+      expect(await processGroupMembers(100, fakeProc(entries, [], procMount(options)).deps), options).toEqual([100, 200]);
+    }
+  });
+
+  it("throws when mountinfo is unreadable or shows no /proc mount, never assuming a normal one", async () => {
+    const entries = { "100": procStat(100, 100) };
+    await expect(processGroupMembers(100, fakeProc(entries, [], "").deps)).rejects.toThrow(/no \/proc mount/);
+    await expect(processGroupMembers(100, fakeProc(entries, [], "25 1 8:1 / / rw - ext4 /dev/sda1 rw\n").deps)).rejects.toThrow(/no \/proc mount/);
+    const { deps } = fakeProc(entries);
+    const failing = { ...deps, readFile: async (path: string) => { if (path === "/proc/self/mountinfo") throw new Error("EACCES mountinfo"); return procStat(100, 100); } };
+    await expect(processGroupMembers(100, failing)).rejects.toThrow(/EACCES mountinfo/);
+  });
+
+  it("fails closed when the scan outlasts the 2 s deadline (injected clock), and does not when it stays inside it", async () => {
+    const entries = { "100": procStat(100, 100), "200": procStat(200, 100), "300": procStat(300, 300) };
+    let clock = 0;
+    const slow = fakeProc(entries);
+    const reading = { ...slow.deps, now: () => clock, readFile: vi.fn<ProcessIdentityDeps["readFile"]>(async (path, enc) => { if (path === "/proc/200/stat") clock += 2001; return slow.deps.readFile(path, enc); }) };
+    await expect(processGroupMembers(100, reading)).rejects.toThrow(/exceeded 2000 ms/);
+    clock = 0;
+    const quick = { ...slow.deps, now: () => clock, readFile: async (path: string, enc: "utf8") => { clock += 500; return slow.deps.readFile(path, enc); } };
+    expect(await processGroupMembers(100, quick)).toEqual([100, 200]);
+  });
+
+  it("fails closed when a /proc read never returns (real 2 s timer)", async () => {
+    vi.useFakeTimers();
+    try {
+      const stuck = { ...fakeProc({ "100": procStat(100, 100) }).deps, readFile: (path: string) => path === "/proc/self/mountinfo" ? Promise.resolve(NORMAL_MOUNTINFO) : new Promise<string>(() => {}) };
+      const outcome = expect(processGroupMembers(100, stuck)).rejects.toThrow(/exceeded 2000 ms/);
+      await vi.advanceTimersByTimeAsync(2001);
+      await outcome;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("the macOS path still runs ps, never /proc", async () => {
