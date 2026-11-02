@@ -570,7 +570,7 @@ describe("review fix P2-3: the plugin setting is the global gate", () => {
     const { session, writes, events, listCalls } = await world({ allowShell: true, setting: false });
     expect(session.state.outcome).toBe("readonly");
     expect(session.state.binding.allowShell).toBeUndefined();
-        expect(listCalls.every((call) => call === undefined)).toBe(true); // shells are not even listed
+    expect(listCalls.every((call) => call === undefined)).toBe(true); // shells are not even listed
     const persisted = events.filter((e) => e.type === "session.persistence").at(-1);
     expect(persisted && "persistence" in persisted && (persisted.persistence.data as Record<string, unknown>).allowShell).toBeUndefined();
     await session.prompt(prompt("p1"));
