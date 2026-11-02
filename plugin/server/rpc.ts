@@ -5,13 +5,13 @@ import type { PluginHandlerContext, PluginServerContext } from "@getpaseo/plugin
 
 // Derived from the SDK: Paseo's compiler can't resolve @getpaseo/client in an install without node_modules.
 type PaseoApi = PluginHandlerContext["paseo"];
-import { herdrAgentRestartRpc, herdrChatReadyRpc, herdrDiagnosticsRpc, herdrDuplicatesArchiveRpc, herdrFoldersSuggestRpc, herdrOverviewRpc, herdrTargetRpc, herdrWorkspaceCreateRpc, type CompanionStatus, type HerdrTarget, type FolderSuggestion, type OverviewAgent, type OverviewTab, type OverviewWorkspace } from "../shared/rpc.js";
+import { herdrAgentRestartRpc, herdrChatAllowShellRpc, herdrChatShellAcknowledgeRpc, herdrChatReadyRpc, herdrDiagnosticsRpc, herdrDuplicatesArchiveRpc, herdrFoldersSuggestRpc, herdrOverviewRpc, herdrTargetRpc, herdrWorkspaceCreateRpc, type CompanionStatus, type HerdrTarget, type FolderSuggestion, type OverviewAgent, type OverviewTab, type OverviewWorkspace } from "../shared/rpc.js";
 import { parseBinding, sameRef, sessionRefOf, type Binding } from "./binding.js";
 import { expandHome, suggestFolders } from "./folders.js";
 import { restartAgent } from "./restart.js";
 import { buildDiagnostics, type DiagnosticsInput } from "./diagnostics.js";
 import { PLUGIN_VERSION } from "./plugin-version.js";
-import type { BoundSessions } from "./bound-sessions.js";
+import type { BoundSessions, OpenSessions } from "./bound-sessions.js";
 import { attachArgs, attachCommand } from "./herdr-commands.js";
 import { resolveSocketPath } from "./herdr/socket-path.js";
 import { HerdrClient } from "./herdr/client.js";
@@ -43,6 +43,10 @@ export interface ManagementDeps {
   restart?: typeof restartAgent;
   /** Bound chats awaiting `herdr.chat.ready`. */
   boundSessions?: BoundSessions;
+  /** The plugin's `allowShell` gate: its enable epoch while the setting is on, else null. Shell input can only be turned on while it is open. Absent = closed. */
+  shellEpoch?: () => Promise<number | null>;
+  /** Open conversations by Paseo agent id (`herdr.chat.allow-shell`). */
+  openSessions?: OpenSessions;
   /** Environment the CLI would resolve its socket with; defaults to `process.env`. */
   env?: Readonly<Record<string, string | undefined>>;
   /** Reads the OMP input companion's install state. Required so tests inject a fake and never read the real home. */
@@ -469,6 +473,36 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
   server.handle(herdrChatReadyRpc, async ({ terminalId }) => {
     const { target } = await deps.readTarget();
     return { flushed: deps.boundSessions?.flushHistory(target.herdrSession, terminalId) ?? 0 };
+  });
+
+  server.handle(herdrChatAllowShellRpc, async ({ agentId, enabled }) => {
+    const sessions = deps.openSessions?.byAgentId(agentId) ?? [];
+    let epoch: number | null = null;
+    if (enabled) {
+      try { epoch = (await deps.shellEpoch?.()) ?? null; } catch (error) {
+        throw new Error(`The Herdr plugin settings could not be read, so shell input was not turned on (${error instanceof Error ? error.message : String(error)}); try again.`);
+      }
+      if (epoch === null) throw new Error("Shell input is turned off in the Herdr plugin settings; turn on \"Allow shell input\" there first.");
+    }
+    if (sessions.length === 0) {
+      if (enabled) throw new Error("This conversation is not open in the Herdr plugin; open it in Paseo first.");
+      // Paseo owns the stored flag and the plugin cannot rewrite it, so remember the revocation; the next open of this agent id clears it.
+      deps.openSessions?.revokeShell(agentId);
+      // Never `applied: false` here: that reads as "nothing to stop". A conversation that is open but has no `PASEO_AGENT_ID` in its env cannot be reached by id, and keeps typing.
+      throw new Error(`No open conversation in the Herdr plugin has Paseo agent id ${agentId}, so nothing was stopped now. If it is closed, it loses shell input when it is next opened; if it is open and still typing, turn off "Allow shell input" in the Herdr plugin settings.`);
+    }
+    if (enabled) deps.openSessions?.clearRevoked(agentId);
+    let applied = false;
+    for (const session of sessions) applied = session.setAllowShell(enabled, epoch ?? undefined).applied || applied;
+    return { enabled, applied };
+  });
+
+  server.handle(herdrChatShellAcknowledgeRpc, async ({ agentId }) => {
+    const sessions = deps.openSessions?.byAgentId(agentId) ?? [];
+    if (sessions.length === 0) throw new Error("This conversation is not open in the Herdr plugin; open it in Paseo first.");
+    let acknowledged = false;
+    for (const session of sessions) acknowledged = session.acknowledgeShell() || acknowledged;
+    return { acknowledged };
   });
 
   server.handle(herdrWorkspaceCreateRpc, async ({ cwd, label }) => {

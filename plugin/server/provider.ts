@@ -16,10 +16,11 @@ import { discoverSessions } from "./discovery.js";
 import { launchAgent } from "./launch.js";
 import { HerdrHarnessSession, capabilitiesFor, pendingBinding, type SessionDeps } from "./session.js";
 import { ModelCache } from "./config.js";
-import type { BoundSessions } from "./bound-sessions.js";
+import type { BoundSessions, OpenSessions } from "./bound-sessions.js";
 import { paneClaims } from "./pane-claims.js";
 import type { PermissionResponder } from "./host.js";
 import { HERDR_BIND_OPTION, NATIVE_DEFAULT_MODEL } from "../shared/model.js";
+import type { ShellGate } from "../shared/settings.js";
 
 export interface ProviderHooks {
   /** Optional hook to stamp the resolved Herdr session name into persistence. */
@@ -37,13 +38,21 @@ export interface ProviderHooks {
   bindHistoryDelayMs?: number;
   /** Shared with the management RPCs so `herdr.chat.ready` can flush a bound chat's history. */
   boundSessions?: BoundSessions;
+  /** Shared with the management RPCs so `herdr.chat.allow-shell` can reach an open conversation. */
+  openSessions?: OpenSessions;
+  /** The plugin's `allowShell` gate (default off): the enable epoch the settings UI stored when it last moved the switch on, or null while closed. Absent = closed. Rejects when the setting cannot be read. */
+  shellEpoch?: () => Promise<number | null>;
+  /** Synchronous, subscription-fed view of {@link shellEpoch}; null = read and closed, `"unknown"` = not read yet or unreadable. */
+  shellEpochNow?: () => ShellGate;
   /** The Paseo API handle captured from a lifecycle hook (null until one has fired). */
   getPaseo?: () => PermissionResponder | null;
   /** Tests: replaces the real timer between approval polls. */
   approvalSleep?: SessionDeps["approvalSleep"];
 }
 
-const BindOptionSchema = z.object({ terminalId: z.string().min(1), paneId: z.string().optional() });
+const BindOptionSchema = z.object({ terminalId: z.string().min(1), paneId: z.string().optional(),
+  /** Opt this binding into shell input: prompt text may run as commands in a plain shell pane. Default false. */
+  allowShell: z.boolean().optional() });
 
 export function createHerdrProvider(
   adapter: HarnessAdapter,
@@ -94,7 +103,7 @@ export function createHerdrProvider(
         return {
           socketPath,
           adapter,
-          listAgents: async (signal?: AbortSignal) => listPaneTargets(request, { signal }),
+          listAgents: async (signal?: AbortSignal, options?: { includeShells?: boolean }) => listPaneTargets(request, { signal, ...(options?.includeShells ? { includeShells: true } : {}) }),
           request,
           subscribe: async (subscriptions: SubscriptionDescriptor[], options?: { signal?: AbortSignal }) => herdr.subscribe(subscriptions, options),
           emit,
@@ -102,6 +111,9 @@ export function createHerdrProvider(
           ...(hooks.getPaseo ? { getPaseo: hooks.getPaseo } : {}),
           ...(hooks.approvalSleep ? { approvalSleep: hooks.approvalSleep } : {}),
           getHerdrSession: () => herdrSession,
+          ...(hooks.shellEpoch ? { shellEpoch: hooks.shellEpoch } : {}),
+          ...(hooks.shellEpochNow ? { shellEpochNow: hooks.shellEpochNow } : {}),
+          shellRevoked: (agentId) => hooks.openSessions?.isRevoked(agentId) ?? false,
           routesNewWork: (kind) => resolver.select(kind) === adapter,
           ...(hooks.bindHistoryDelayMs !== undefined ? { bindHistoryDelayMs: hooks.bindHistoryDelayMs } : {}),
           // An adapter without a launch spec is import/bind only; `session.open` refuses to create.
@@ -132,6 +144,7 @@ export function createHerdrProvider(
         session.signal.addEventListener("abort", () => {
           if (sessions.get(sessionId) === session) sessions.delete(sessionId);
           hooks.boundSessions?.delete(session);
+          hooks.openSessions?.delete(session);
           claims.get(session)?.();
           claims.delete(session);
         }, { once: true });
@@ -139,6 +152,7 @@ export function createHerdrProvider(
         try { if (claimOnRegister && binding.terminalId) claim(session, deps.socketPath); }
         catch (error) { session.close(); throw error; }
         sessions.set(sessionId, session);
+        hooks.openSessions?.add(session);
         return session;
       };
 
@@ -200,12 +214,22 @@ export function createHerdrProvider(
                 if (!parsed.success) throw new Error("Invalid herdrBind option: expected { terminalId, paneId? }");
                 const deps = await sessionDeps();
                 if (closed) return;
-                const agent = (await deps.listAgents(controller.signal)).find((candidate) => candidate.terminal_id === parsed.data.terminalId);
+                const allowShell = parsed.data.allowShell === true;
+                if (allowShell && !adapter.shell) throw new Error(`${adapter.label} conversations cannot take shell input`);
+                let allowShellEpoch: number | null = null;
+                if (allowShell) {
+                  try { allowShellEpoch = (await hooks.shellEpoch?.()) ?? null; } catch (error) {
+                    throw new Error(`The Herdr plugin settings could not be read, so shell input was not turned on (${error instanceof Error ? error.message : String(error)}); try again`);
+                  }
+                  if (allowShellEpoch === null) throw new Error("Shell input is turned off in the Herdr plugin settings; turn on \"Allow shell input\" there first");
+                }
+                const agent = (await (allowShell ? deps.listAgents(controller.signal, { includeShells: true }) : deps.listAgents(controller.signal))).find((candidate) => candidate.terminal_id === parsed.data.terminalId);
                 if (closed) return;
                 if (!agent) throw new Error(`The Herdr agent in terminal ${parsed.data.terminalId} is no longer running`);
+                if (allowShell && agent.agent) throw new Error(`Herdr detects ${agent.agent} in terminal ${parsed.data.terminalId}; shell input applies only to plain shell panes`);
                 // New binding: route by kind, so a specific adapter wins over this one even if it is the fallback.
                 if (resolver.select(agent.agent) !== adapter) throw new Error(`The Herdr agent in terminal ${parsed.data.terminalId} is not a ${adapter.label} agent`);
-                const binding = bindingOf(agent, adapter, deps.getHerdrSession?.() ?? null);
+                const binding = bindingOf(agent, adapter, deps.getHerdrSession?.() ?? null, { allowShell, ...(allowShellEpoch !== null ? { allowShellEpoch } : {}) });
                 if (sessions.has(input.sessionId)) throw new Error("Session already open");
                 const session = register(input.sessionId, binding, deps);
                 if (!session) return;

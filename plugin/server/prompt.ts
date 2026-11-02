@@ -58,6 +58,10 @@ export class PromptController {
     }
     const text = prompt.input.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
     if (!text.trim()) return fail("Prompt cannot be empty");
+    // An earlier shell delivery of unknown outcome may have left text on the command line (or run it): never type over that unasked.
+    if (state.binding.occupant?.shell && session.shellUncertain) {
+      return fail("An earlier command may have been typed into the shell without being confirmed. Check the terminal, then reopen this conversation to continue. Nothing was typed.");
+    }
     // This reservation is synchronous: no second request can pass while preflight awaits I/O.
     state.admitting = true;
     const generation = state.generation;
@@ -66,6 +70,10 @@ export class PromptController {
       const agent = await session.validateAgent();
       if (!session.current(generation) || !agent || !state.connected) {
         if (!session.isAborted) fail("The bound native agent is unavailable; input was not sent");
+        return;
+      }
+      if (state.binding.allowShell && session.shellSettingUnreadable) {
+        fail("Shell input is unavailable right now: the Herdr plugin settings could not be read. It was not turned off. Nothing was typed; try again.");
         return;
       }
       await session.live.readTranscript();
@@ -92,9 +100,16 @@ export class PromptController {
       state.tracker.reservePending({ turnId: randomUUID(), clientMessageId: prompt.clientMessageId,
         baseline: { stateChangeSeq: agent.state_change_seq, completionSeq: agent.completion_seq ?? null } });
       reserved = true;
-      const outcome = await session.adapter.submitPrompt({ pid: occupant.pid, ref, instanceId: occupant.instanceId,
-        paneId: agent.pane_id, terminalId: agent.terminal_id,
-        pane: { paneId: agent.pane_id, terminalId: agent.terminal_id, process: processInfo } }, text, { signal: session.signal, request: session.deps.request });
+      const target = { pid: occupant.pid, ref, instanceId: occupant.instanceId,
+        paneId: agent.pane_id, terminalId: agent.terminal_id, agentKind: agent.agent ?? null,
+        pane: { paneId: agent.pane_id, terminalId: agent.terminal_id, process: processInfo } };
+      const ctx = { signal: session.signal, request: session.deps.request, stillAllowed: () => session.shellStillAllowed(generation), allowedNow: () => session.shellAllowedNow(generation) };
+      // A shell occupant is typed into as a command line; every other occupant goes through the adapter's own submit.
+      const shell = occupant.shell ? session.adapter.shell : undefined;
+      if (occupant.shell && !shell) throw new Error("This adapter cannot type into a shell");
+      const outcome = shell ? await shell.submit(target, text, ctx) : await session.adapter.submitPrompt(target, text, ctx);
+      if (shell && outcome.type === "uncertain") session.markShellUncertain();
+      if (shell && session.current(generation) && outcome.type !== "rejected") session.shellPromptNotice();
       if (!session.current(generation)) return;
       if (outcome.type === "rejected") {
         // A definite rejection starts no terminal turn here: the tracker cannot see the stale-`working` echo guard, so
@@ -110,7 +125,10 @@ export class PromptController {
       }
     } catch (error) {
       if (session.isAborted) return;
-      if (reserved) state.tracker.pendingUncertain(error instanceof Error ? error.message : String(error));
+      if (reserved) {
+        if (state.binding.occupant?.shell) session.markShellUncertain();
+        state.tracker.pendingUncertain(error instanceof Error ? error.message : String(error));
+      }
       else fail(error instanceof Error ? error.message : String(error));
     } finally {
       state.admitting = false;
@@ -144,7 +162,22 @@ export class PromptController {
         done();
         return;
       }
-      await session.deps.request("pane.send_keys", { pane_id: agent.pane_id, keys: [...session.adapter.interruptKeys] }, { signal: session.signal });
+      const shell = state.binding.occupant?.shell ? session.adapter.shell : undefined;
+      if (shell && agent.agent_status !== "working") {
+        // The shell is at its prompt (or unreadable): Ctrl+C would only edit the command line. Send nothing.
+        done();
+        return;
+      }
+      const keys = shell ? shell.interruptKeys : session.adapter.interruptKeysFor?.(agent.agent) ?? session.adapter.interruptKeys;
+      if (!keys.length) {
+        session.emit({ type: "session.notice", sessionId: session.sessionId, notice: {
+          id: "interrupt-unavailable", severity: "warning", title: "Stop is not available for this agent",
+          description: "Paseo has no safe interrupt key for this agent; no key was sent. Stop it in the terminal.",
+        } });
+        done();
+        return;
+      }
+      await session.deps.request("pane.send_keys", { pane_id: agent.pane_id, keys: [...keys] }, { signal: session.signal });
       if (!session.current(generation)) return;
       state.tracker.interruptRequested();
     } catch (error) {

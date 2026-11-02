@@ -5,10 +5,11 @@ import { ompAdapter } from "./server/harness/omp/adapter.js";
 import { createHerdrProvider } from "./server/provider.js";
 import { registerManagementRpcs } from "./server/rpc.js";
 import { companionInstallStatus } from "./server/harness/omp/companion-install.js";
-import { BoundSessions } from "./server/bound-sessions.js";
+import { BoundSessions, OpenSessions } from "./server/bound-sessions.js";
 import { TargetReadiness, defaultTargetReadinessDeps, resolveTarget } from "./server/herdr/target.js";
 import { PaseoHost } from "./server/host.js";
 import { herdrSettings } from "./shared/settings.js";
+import { createShellEpochCache } from "./server/shell-epoch-cache.js";
 
 export default function contribute(server: PluginServerContext) {
   const settings = server.registerSettings(herdrSettings);
@@ -24,6 +25,10 @@ export default function contribute(server: PluginServerContext) {
     if (state.status === "invalid") throw new Error(state.error);
     return state.values;
   };
+  // The enable epoch of the shell gate: the settings UI stores a new one on every move of "Allow shell input". A setting
+  // that is on with no epoch (written before epochs, or by something other than the UI switch) keeps the gate closed.
+  // The cache is the synchronous view for the checks between the last foreground look and a write, where no I/O is allowed.
+  const shellGate = createShellEpochCache(settings);
   const readTarget = async () => {
     const values = await readSettings();
     return { target: resolveTarget(values, env), ompEnabled: values.enableOmp, enabled: (adapterId: string) => harnessEnabled(values, adapterId) };
@@ -37,6 +42,7 @@ export default function contribute(server: PluginServerContext) {
     return target.autoStart ? (await readiness.ensureReady(target)).target.socketPath : target.socketPath;
   };
   const boundSessions = new BoundSessions();
+  const openSessions = new OpenSessions();
   // Paseo gives every hook the plugin's one PaseoApi, which stays valid until the plugin stops. Provider code has no
   // other way to reach it, so capture it from the first hook that fires. Our own cards fire permission_requested.
   const host = new PaseoHost();
@@ -47,11 +53,14 @@ export default function contribute(server: PluginServerContext) {
     server.registerProvider(createHerdrProvider(adapter, socketPath, {
       getHerdrSession: () => herdrSession,
       isEnabled: async () => harnessEnabled(await readSettings(), adapter.id),
+      shellEpoch: shellGate.read,
+      shellEpochNow: shellGate.now,
       resolver,
       boundSessions,
+      openSessions,
       getPaseo: () => host.get(),
     }));
   }
-  registerManagementRpcs(server, { readTarget, ensureReady: (target) => readiness.ensureReady(target), harnesses, boundSessions, resolver, companionStatus: () => companionInstallStatus() });
-  return () => {};
+  registerManagementRpcs(server, { readTarget, shellEpoch: shellGate.read, ensureReady: (target) => readiness.ensureReady(target), harnesses, boundSessions, openSessions, resolver, companionStatus: () => companionInstallStatus() });
+  return () => { shellGate.stop(); };
 }

@@ -3,8 +3,13 @@ import type { AgentSessionRef, PaneProcessInfo } from "../herdr/schema.js";
 
 export type NativeTurnEnd = "completed" | "aborted" | "error" | "unknown";
 
-/** How a session learns that a native turn ended: by reading the transcript, or from Herdr's agent status alone. */
-export type TurnEvidence = "transcript" | "status";
+/**
+ * How a session learns that a native turn ended: by reading the transcript, from Herdr's agent status alone, or
+ * (a shell binding only) from the pane's foreground process: working while a child holds the foreground, ended
+ * when the foreground returns to the shell. "process" is never an adapter's own `turnEvidence`; a session switches to it
+ * for a binding whose occupant is an opted-in shell.
+ */
+export type TurnEvidence = "transcript" | "status" | "process";
 
 /** How a session binds to its agent: a native session ref, or the pane itself. */
 export type BindingMode = "native-ref" | "pane";
@@ -147,10 +152,44 @@ export type PromptDelivery =
   | { type: "uncertain"; message: string };
 /** "unknown" = the harness could not tell (transport failure, identity mismatch, unrecognized reply). */
 export type RestoredPromptOutcome = "cleared" | "kept" | "unknown" | "unsupported";
+/**
+ * Optional shell opt-in: a binding with `allowShell` set may be bound to a plain shell pane, and prompt text then runs
+ * as commands. Absent = shells are refused (`isOccupant` false for a shell leader).
+ */
+export interface ShellSupport {
+  /**
+   * Whether this foreground process is a command shell that executes whatever is typed at it. Judged by the kernel process
+   * name only: argv0 is whatever the program was started as (`exec -a zsh vim`). A multiplexer or `login` is not a shell.
+   */
+  isShell(process: { name: string }): boolean;
+  /**
+   * Every pid in process group `pgid`, from a source that sees what Herdr's foreground list can hide (macOS omits root and
+   * setuid processes). Rejects when it cannot tell; the caller then treats the shell as not idle.
+   */
+  groupMembers(pgid: number): Promise<number[]>;
+  /** Keys that stop a command running in the foreground; never sent while the shell itself is idle. */
+  readonly interruptKeys: readonly string[];
+  /** Shown when the binding opens with the flag on and with every accepted prompt. */
+  readonly notice: string;
+  /**
+   * Type one line and press Enter. A `rejected` result wrote nothing; an error or timeout after any write is `uncertain`
+   * and the prompt is never resent.
+   */
+  submit(target: InputTarget & { instanceId: string; paneId: string; terminalId: string }, text: string, ctx: {
+    signal: AbortSignal;
+    request(method: string, params?: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<unknown>;
+    /** Async check: shell input is still allowed (kill switch, a fresh read of the plugin setting and its enable epoch, session generation). */
+    stillAllowed(): Promise<boolean>;
+    /** Synchronous: same session and generation, flag still on, not revoked. No I/O, so nothing can change between it and the next write. */
+    allowedNow(): boolean;
+  }): Promise<PromptDelivery>;
+}
 export interface InputTarget {
   pid: number;
   /** Null only when the adapter's binding mode is "pane". */
   ref: AgentSessionRef | null;
+  /** Herdr's `agent` kind for the bound pane as last validated (null = none detected). */
+  agentKind?: string | null;
   /** Present for pane-bound sessions; process info as last validated. */
   pane?: { paneId: string; terminalId: string; process: PaneProcessInfo };
 }
@@ -186,8 +225,15 @@ export interface HarnessAdapter {
     request(method: string, params?: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<unknown>;
   }): Promise<PromptDelivery>;
   readonly interruptKeys: readonly string[];
+  /**
+   * Optional: keys that stop a turn of a pane whose Herdr `agent` kind is `kind`, for an adapter that serves several
+   * kinds. Absent = `interruptKeys`. An empty list means Stop is refused for that kind (no key is sent).
+   */
+  interruptKeysFor?(kind: string | null | undefined): readonly string[];
   readonly promptWhileWorking: "reject";
   isOccupant(proc: PaneProcessInfo): boolean;
+  /** Optional shell opt-in (see {@link ShellSupport}); only a binding with `allowShell` uses it. */
+  readonly shell?: ShellSupport;
   readonly blockedHint: string;
   /** Optional: input companion install check; a not-ok result keeps import read-only. */
   inputCompanionStatus?(): Promise<{ ok: boolean; diagnostic?: string }>;

@@ -1,16 +1,21 @@
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 
 /** Injectable seams so tests never spawn a process or read /proc. */
 export interface ProcessIdentityDeps {
   execFile: (file: string, args: string[], options: { timeout: number; env: NodeJS.ProcessEnv }) => Promise<{ stdout: string }>;
   readFile: (path: string, encoding: "utf8") => Promise<string>;
+  readdir: (path: string) => Promise<string[]>;
   platform: NodeJS.Platform;
+  /** Milliseconds clock for the `/proc` scan deadline. */
+  now: () => number;
 }
 
 const PS_TIMEOUT_MS = 2000;
-/** Absolute, not via PATH: exists on macOS and Linux. */
+/** The Linux `/proc` scan that timed out and has not settled yet; see `processGroupMembers`. */
+let stuckScan: Promise<void> | undefined;
+/** Absolute, not via PATH. Used on macOS only: Linux reads `/proc`, which needs no `ps` binary. */
 const PS_PATH = "/bin/ps";
 /** C-locale `ps -o lstart=`: `Thu Oct 30 22:13:44 2026` (day space-padded). Anything else (e.g. `?` for a process ps cannot inspect) is not an identity. */
 const LSTART = /^(Sun|Mon|Tue|Wed|Thu|Fri|Sat) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) [ \d]\d \d\d:\d\d:\d\d \d{4}$/;
@@ -22,7 +27,9 @@ const defaultDeps: ProcessIdentityDeps = {
     return { stdout };
   },
   readFile: (path, encoding) => readFile(path, encoding),
+  readdir: (path) => readdir(path),
   platform: process.platform,
+  now: () => Date.now(),
 };
 
 /** `/proc/<pid>/stat` field 22 (starttime, clock ticks since boot). `comm` (field 2) is parenthesised and may hold spaces or parens. */
@@ -60,4 +67,100 @@ export async function processInstanceId(pid: number, deps: Partial<ProcessIdenti
     if (!LSTART.test(start)) throw new Error(`ps returned an unrecognised start time for pid ${pid}`);
   }
   return `${pid}@${start}`;
+}
+
+/** The pgrp (field 5) of a `/proc/<pid>/stat`: after the comm terminator, state is field 3, ppid 4, pgrp 5. */
+function linuxProcessGroup(stat: string): number {
+  const close = stat.lastIndexOf(")");
+  if (close < 0) throw new Error("malformed /proc stat: no comm terminator");
+  const pgrp = stat.slice(close + 1).trim().split(/\s+/)[2];
+  if (!pgrp || !/^\d+$/.test(pgrp)) throw new Error("malformed /proc stat: no process group");
+  return Number(pgrp);
+}
+
+/** A process that exited between the directory listing and the read. Nothing else is skipped. */
+function vanished(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  return code === "ENOENT" || code === "ESRCH";
+}
+
+/** `hidepid` values that leave every process visible. */
+const HIDEPID_OPEN = new Set(["0", "off"]);
+
+/**
+ * Throws unless `/proc` shows every process to this user. A `/proc` mounted with `hidepid=` other than `0`/`off` omits
+ * (`1`: refuses to read) other users' processes, and `subset=pid` hides the per-pid entries a scan needs; a scan under
+ * either cannot prove a process group holds only the shell. Reads `/proc/self/mountinfo`: the options of every mount at
+ * `/proc` of type `proc` are checked (an overmount could hide an earlier one). No `/proc` mount found is also a throw.
+ */
+function assertProcFullyVisible(mountinfo: string): void {
+  let seen = false;
+  for (const line of mountinfo.split("\n")) {
+    const parts = line.split(" ");
+    const separator = parts.indexOf("-");
+    // Fields: id parent major:minor root mountpoint mount-options [optional...] - fstype source super-options
+    if (separator < 6 || parts[4] !== "/proc" || parts[separator + 1] !== "proc") continue;
+    seen = true;
+    for (const option of [...(parts[5] ?? "").split(","), ...(parts[separator + 3] ?? "").split(",")]) {
+      const [key, value = ""] = option.split("=", 2);
+      if (key === "hidepid" && !HIDEPID_OPEN.has(value)) throw new Error(`/proc is mounted with hidepid=${value}: other users' processes are not visible`);
+      if (key === "subset" && value === "pid") throw new Error("/proc is mounted with subset=pid: process entries are not all visible");
+    }
+  }
+  if (!seen) throw new Error("no /proc mount found in /proc/self/mountinfo");
+}
+
+/**
+ * Pids that are members of process group `pgid`, every process of every user, root included.
+ * - macOS: `ps -A -o pid=,pgid=`. Herdr's own `foreground_processes` there silently omits any process it cannot read
+ *   (root, setuid: `sudo`, `su`), so it cannot prove a group holds only the shell.
+ * - Linux: a scan of `/proc/[0-9]*` stat files (field 5), so no `ps` binary is needed. The stat files are world-readable,
+ *   but `/proc` mounted with `hidepid` (or `subset=pid`) hides other users' processes: the scan would then miss `sudo`
+ *   and look alone, so `/proc/self/mountinfo` is checked first and a `hidepid`/`subset=pid` mount throws. The scan has the
+ *   same 2 s deadline as `ps`; a scan that timed out on a read that never returns blocks new scans (each throws) until that
+ *   read settles, so stuck reads cannot pile up on libuv's worker threads. A pid that vanishes mid-scan is skipped; any
+ *   other read error, an unparseable stat or an empty `/proc` throws.
+ * Throws on any failure, an empty answer or any unparseable entry: callers read a throw as "unknown", never as "the group is alone".
+ */
+export async function processGroupMembers(pgid: number, deps: Partial<ProcessIdentityDeps> = {}): Promise<number[]> {
+  if (!Number.isSafeInteger(pgid) || pgid <= 0) throw new Error(`invalid process group: ${pgid}`);
+  const { execFile: run, readFile: read, readdir: list, platform, now } = { ...defaultDeps, ...deps };
+  const members: number[] = [];
+  let rows = 0;
+  if (platform === "linux") {
+    const expired = () => new Error(`/proc scan exceeded ${PS_TIMEOUT_MS} ms`);
+    const deadline = now() + PS_TIMEOUT_MS;
+    const scan = async (): Promise<number[]> => {
+      assertProcFullyVisible(await read("/proc/self/mountinfo", "utf8"));
+      for (const name of await list("/proc")) {
+        if (now() > deadline) throw expired();
+        if (!/^[1-9]\d*$/.test(name)) continue;
+        let stat: string;
+        try { stat = await read(`/proc/${name}/stat`, "utf8"); } catch (error) { if (vanished(error)) continue; throw error; }
+        rows++;
+        if (linuxProcessGroup(stat) === pgid) members.push(Number(name));
+      }
+      if (now() > deadline) throw expired();
+      if (rows === 0) throw new Error("/proc listed no processes");
+      return members;
+    };
+    // The per-entry check cannot interrupt a read that never returns; the timer does. That read still holds a libuv
+    // worker, so while a timed-out scan has not settled no new one starts (each would pin another worker).
+    if (stuckScan) throw new Error("previous /proc scan still running");
+    const running = scan();
+    const marker: Promise<void> = running.then(() => {}, () => {}).then(() => { if (stuckScan === marker) stuckScan = undefined; });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => { stuckScan = marker; reject(expired()); }, PS_TIMEOUT_MS); });
+    try { return await Promise.race([running, timeout]); } finally { clearTimeout(timer); }
+  }
+  const { stdout } = await run(PS_PATH, ["-A", "-o", "pid=,pgid="], { timeout: PS_TIMEOUT_MS, env: { ...process.env, LC_ALL: "C" } });
+  for (const line of stdout.split("\n")) {
+    if (!line.trim()) continue;
+    const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
+    if (!match) throw new Error("ps returned an unrecognised process listing");
+    rows++;
+    if (Number(match[2]) === pgid) members.push(Number(match[1]));
+  }
+  if (rows === 0) throw new Error("ps returned no processes");
+  return members;
 }

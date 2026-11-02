@@ -20,6 +20,15 @@ const STATUS_LABELS: Record<HerdrAgentStatus, string> = {
   unknown: "Unknown",
 };
 
+/**
+ * The settings document after the "Allow shell input" switch moves. Every move, on or off, stores a new enable epoch (never
+ * equal to the previous one, even on a repeated clock reading): conversations that opted in under an older epoch stay
+ * disarmed, and so does a later write that only flips `allowShell` back to true, because it keeps the epoch the off-save stored.
+ */
+export function withShellSwitch<T extends { allowShell: boolean; allowShellEpoch: number }>(values: T, allowShell: boolean, now: number): T {
+  return { ...values, allowShell, allowShellEpoch: Math.max(now, values.allowShellEpoch + 1) };
+}
+
 export function statusLabel(status: HerdrAgentStatus): string {
   return STATUS_LABELS[status];
 }

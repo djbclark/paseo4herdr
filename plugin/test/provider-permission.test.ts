@@ -495,6 +495,8 @@ it("uses the session's Paseo agent id and the provider routes session.permission
     server = createServer((stream) => {
       let bytes = "";
       stream.setEncoding("utf8");
+      // A client that closes first must not turn the reply write into an uncaught EPIPE.
+      stream.on("error", () => {});
       stream.on("data", (chunk: string) => {
         bytes += chunk;
         if (!bytes.includes("\n")) return;

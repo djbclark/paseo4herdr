@@ -1,7 +1,9 @@
 import type { ProviderConfigChanges, ProviderEvent, ProviderPrompt, ProviderSessionConfig } from "@getpaseo/plugin/server/provider";
 import type { HarnessAdapter, PaneObservation, RestoredPromptOutcome, TranscriptReader, TranscriptSnapshot } from "./harness/types.js";
 import { adapterAcceptsKind } from "./harness/resolve.js";
-import { PaneProcessInfoResultSchema, type AgentInfo, type AgentStatus, type PaneProcessInfo } from "./herdr/schema.js";
+import { PaneProcessInfoResultSchema, type AgentInfo, type AgentStatus, type PaneProcessInfo, type PaneProcessInfoResult } from "./herdr/schema.js";
+import { checkedShellForeground, type ShellForeground } from "./shell.js";
+import type { ShellGate } from "../shared/settings.js";
 import type { HerdrSubscription, SubscriptionDescriptor } from "./herdr/client.js";
 import { persistenceOf, sameRef, sessionRefOf, type Binding } from "./binding.js";
 import { emptyTimelineState, seedTimeline, type TimelineRow } from "./timeline.js";
@@ -19,7 +21,8 @@ export interface HerdrRequest {
 }
 export interface SessionDeps {
   adapter: HarnessAdapter;
-  listAgents(signal?: AbortSignal): Promise<AgentInfo[]>;
+  /** `includeShells` also lists plain shell panes; only a binding that opted into shell input asks for it. */
+  listAgents(signal?: AbortSignal, options?: { includeShells?: boolean }): Promise<AgentInfo[]>;
   request: HerdrRequest;
   subscribe(subscriptions: SubscriptionDescriptor[], options?: { signal?: AbortSignal }): Promise<HerdrSubscription>;
   emit(event: ProviderEvent): void;
@@ -40,6 +43,18 @@ export interface SessionDeps {
   bindHistoryDelayMs?: number;
   /** P3.6: the Paseo API handle captured from a lifecycle hook, once one has fired. */
   getPaseo?: () => PermissionResponder | null;
+  /**
+   * Plugin-wide gate for shell input (the `allowShell` plugin setting, default off): the enable epoch the settings UI
+   * stored when it last moved the switch on, or null while the gate is closed (setting off, or on without the UI's epoch).
+   * Absent = closed. Rejects when the setting cannot be read, which refuses input but never revokes an opt-in. A binding is
+   * flag-off unless it opted in under exactly this epoch, so turning the setting off and on again re-arms nothing. Read
+   * fresh on each validation and before each shell write.
+   */
+  shellEpoch?: () => Promise<number | null>;
+  /** Synchronous view of the same gate, kept current by the settings subscription and by every `shellEpoch` read; `"unknown"` = not read yet or unreadable. Checked between the last foreground look and each write, where no I/O is allowed. */
+  shellEpochNow?: () => ShellGate;
+  /** A management RPC turned shell input off for this Paseo agent while its conversation was closed; applied (and cleared) at open. */
+  shellRevoked?: (agentId: string) => boolean;
   /** Tests: replaces the real timer between approval polls. Must resolve on abort. */
   approvalSleep?: (ms: number, signal: AbortSignal) => Promise<void>;
 }
@@ -112,6 +127,20 @@ export class HerdrHarnessSession {
   private validationSeq = 0;
   private committedSeq = 0;
   private committed: AgentInfo | null = null;
+  /** Paseo's id for this agent (from the provider env at open); lets management RPCs reach the live session. */
+  paseoAgentId: string | null = null;
+  /**
+   * A shell binding has no Herdr agent status: its status and counters are derived from the foreground process.
+   * `seq` moves on every working/idle change and `completion` on every return to the shell, so the turn tracker reads
+   * them like Herdr's own counters.
+   */
+  private shellTrack: { status: "idle" | "working" | null; seq: number; completion: number } = { status: null, seq: 0, completion: 0 };
+  /**
+   * A shell delivery of unknown outcome (typing or Enter failed or timed out) may have left text on the command line or
+   * run it. Shell input stays blocked for this session, whatever Stop or the settle window does to the turn, until the
+   * user reopens the conversation (a new session) or acknowledges it (`acknowledgeShell`).
+   */
+  private shellUncertainFlag = false;
   /** Live view of this session's pane for pane-bound adapters; it follows terminal and pane moves. */
   readonly observation: PaneObservation;
 
@@ -120,7 +149,7 @@ export class HerdrHarnessSession {
       binding, paneId: null, process: null, reader: null, timeline: emptyTimelineState(), snapshot: null,
       outcome: "active", connected: false, status: "unknown", generation: 0, admitting: false,
       pending: null, turnBaselineEndId: null, workingSeen: false, staleWorking: null,
-      tracker: new TurnTracker({ mode: deps.adapter.turnEvidence, onEffect: (effect) => this.applyEffect(effect) }),
+      tracker: new TurnTracker({ mode: binding.allowShell && binding.occupant?.shell ? "process" : deps.adapter.turnEvidence, onEffect: (effect) => this.applyEffect(effect) }),
     };
     const state = this.state;
     this.observation = {
@@ -206,6 +235,7 @@ export class HerdrHarnessSession {
   async open(config: ProviderSessionConfig, history: "replay" | "skip" | "replay-live", requestId?: string): Promise<void> {
     let live: TimelineRow[] = [];
     this.approvals.begin(config);
+    this.paseoAgentId = config.env?.PASEO_AGENT_ID || null;
     const paneBound = this.adapter.binding === "pane";
     if (paneBound) {
       // A pane reader needs the validated pane, so validate first. Its events (a freeze notice, persistence) must
@@ -261,6 +291,7 @@ export class HerdrHarnessSession {
       if (this.isAborted) return;
     }
     this.emit({ type: "session.ready", requestId, sessionId: this.sessionId });
+    if (this.state.binding.allowShell && this.adapter.shell) this.shellNotice("shell-enabled", "Shell input is on");
     if (this.state.outcome === "active") {
       this.state.connected = true;
       // Before the live loop: it must know whether approvals are on when it first sees a blocked agent.
@@ -309,12 +340,12 @@ export class HerdrHarnessSession {
     } catch { /* the adapter could not tell: same as unsupported */ }
     if (outcome === "cleared" || !this.current(generation)) return;
     if (!this.adapter.discardRestoredPrompt) {
-      // This harness cannot discard text, and it submits by typing into the terminal: the message was typed and may
-      // still sit in the input box, or the harness may have recorded it late. Deny nothing.
+      // This harness cannot discard text, and it submits by typing into the terminal: the message may have been typed and
+      // may still be in the input box, or the harness may have recorded it late. Deny nothing.
       this.emit({ type: "session.notice", sessionId: this.sessionId, notice: {
         id: "restored-prompt", severity: "info",
         title: `${label} may not have received your message`,
-        description: "The message was typed into the terminal and may still be in the input box. Check the terminal before sending it again.",
+        description: "The message may have been typed into the terminal and may still be in the input box. Check the terminal before sending it again.",
       } });
       return;
     }
@@ -347,10 +378,137 @@ export class HerdrHarnessSession {
     this.state.tracker.close();
   }
 
+  /** Raise the shell notice: text typed in this conversation runs as commands. */
+  private shellNotice(id: string, title: string): void {
+    const shell = this.adapter.shell;
+    if (!shell) return;
+    this.emit({ type: "session.notice", sessionId: this.sessionId, notice: { id, severity: "warning", title, description: shell.notice } });
+  }
+
+  /** The notice shown with every prompt delivered to a shell. */
+  shellPromptNotice(): void { this.shellNotice("shell-prompt", "Prompt text runs as shell commands."); }
+
+  /**
+   * Turn shell input on or off for this binding and persist it. Off: the next validation freezes a conversation bound to a
+   * shell (as without the flag). On: allowed unless the pane is bound to an agent; a read-only conversation keeps the flag
+   * for when it is reopened. Turning it on records `epoch`, the plugin setting's enable epoch the caller just read; the
+   * opt-in is valid only while the setting still holds that epoch. Returns whether the change acts on this live conversation now.
+   */
+  setAllowShell(enabled: boolean, epoch?: number): { applied: boolean } {
+    const binding = this.state.binding;
+    if (enabled && epoch === undefined) throw new Error("Turning shell input on needs the plugin setting's enable epoch");
+    if (enabled && !this.adapter.shell) throw new Error(`${this.adapter.label} conversations cannot take shell input`);
+    if (enabled && this.state.outcome === "active" && binding.occupant && !binding.occupant.shell) {
+      throw new Error("This conversation is bound to an agent, not a plain shell; shell input cannot be turned on for it");
+    }
+    const wasOn = binding.allowShell === true;
+    if (wasOn === enabled && (!enabled || binding.allowShellEpoch === epoch)) return { applied: this.state.outcome === "active" };
+    if (enabled) { binding.allowShell = true; binding.allowShellEpoch = epoch; } else { delete binding.allowShell; delete binding.allowShellEpoch; }
+    this.persist();
+    if (this.state.outcome !== "active") return { applied: false };
+    if (enabled) { if (!wasOn) this.shellNotice("shell-enabled", "Shell input is on"); }
+    // Off: freeze now, not at the next poll. This bumps the generation, so a prompt already being delivered stops before its write.
+    else if (binding.occupant?.shell) this.freeze("Shell input is turned off", "Shell input is turned off for this conversation; no input will be sent to the shell.");
+    void this.live.reconcile();
+    return { applied: true };
+  }
+
+  get shellUncertain(): boolean { return this.shellUncertainFlag; }
+  markShellUncertain(): void { this.shellUncertainFlag = true; }
+  /** The user checked the terminal after an unconfirmed shell delivery: shell input may continue. Returns whether anything was blocked. */
+  acknowledgeShell(): boolean {
+    const was = this.shellUncertainFlag;
+    this.shellUncertainFlag = false;
+    return was;
+  }
+
+  /** The gate as read now: null when revoked while the conversation was closed or the setting is off or has no epoch, `"unknown"` when the setting could not be read. */
+  private async shellGate(): Promise<ShellGate> {
+    if (this.chatShellRevoked()) return null;
+    try { return (await this.deps.shellEpoch?.()) ?? null; } catch { return "unknown"; }
+  }
+
+  /**
+   * What a gate reading means for this binding. A binding is armed only by the epoch it opted in under; a missing epoch on
+   * either side is flag-off. `revoke`: the setting was read and is off or holds another epoch. `unknown`: it could not be read
+   * (or not yet): input is refused, but the opt-in is kept, because a failed read says nothing about the setting.
+   */
+  private gateVerdict(gate: ShellGate): "open" | "revoke" | "unknown" {
+    if (gate === "unknown") return "unknown";
+    return gate !== null && this.state.binding.allowShellEpoch === gate ? "open" : "revoke";
+  }
+
+  /** True while the last validation could not read the plugin setting: shell input is refused, but it was not turned off and no opt-in was forgotten. */
+  shellSettingUnreadable = false;
+
+  /** True when this chat's flag was turned off through `herdr.chat.allow-shell` while it was closed (the plugin setting may still be on). */
+  private chatShellRevoked(): boolean {
+    const agentId = this.paseoAgentId;
+    return Boolean(agentId && this.deps.shellRevoked?.(agentId));
+  }
+
+  /**
+   * Cut the shell opt-in off for good: forget the persisted flag and its epoch (turning the setting back on re-arms nothing) and freeze.
+   * `cause` names what was turned off in the notice: only this chat's flag, or the plugin setting.
+   */
+  private revokeShell(cause: "chat" | "setting"): void {
+    const binding = this.state.binding;
+    if (binding.allowShell || binding.allowShellEpoch !== undefined) {
+      delete binding.allowShell;
+      delete binding.allowShellEpoch;
+      this.persist();
+    }
+    if (binding.occupant?.shell) this.freeze("Shell input is turned off", `Shell input is turned off ${cause === "chat" ? "for this conversation" : "in the Herdr plugin settings"}; no input will be sent to the shell.`);
+  }
+
+  /** The conversation is the one that admitted the prompt and its flag is still on. The kill switch and every revocation clear the flag and bump the generation synchronously, so this sees them. */
+  private shellFlagOn(generation: number): boolean {
+    return this.current(generation) && this.state.outcome === "active" && this.state.binding.allowShell === true;
+  }
+
+  /**
+   * Synchronous last look before a shell write, no I/O: {@link shellFlagOn} and the cached plugin setting still holds the
+   * binding's epoch. A closed or foreign epoch revokes; an unreadable (or not yet read) setting only refuses.
+   */
+  shellAllowedNow(generation: number): boolean {
+    if (!this.shellFlagOn(generation)) return false;
+    const cached = this.deps.shellEpochNow;
+    if (!cached) return true;
+    const verdict = this.gateVerdict(cached());
+    if (verdict === "revoke") this.revokeShell("setting");
+    return verdict === "open";
+  }
+
+  /** Async check before the first shell write: a fresh read of the plugin setting says the binding's opt-in is still valid, then {@link shellAllowedNow}. */
+  async shellStillAllowed(generation: number): Promise<boolean> {
+    if (!this.shellFlagOn(generation)) return false;
+    const verdict = this.gateVerdict(await this.shellGate());
+    if (verdict === "revoke" && this.current(generation)) this.revokeShell(this.chatShellRevoked() ? "chat" : "setting");
+    return verdict === "open" && this.shellAllowedNow(generation);
+  }
+
   /** Refresh terminal, native session, foreground leader and process-local nonce. */
   async validateAgent(moveRetry = false, seq = ++this.validationSeq): Promise<AgentInfo | null> {
     const generation = this.state.generation;
-    const agents = await this.deps.listAgents(this.signal);
+    // The plugin setting is the global kill switch: closed, every binding counts as flag-off, persisted ones included. A
+    // persisted flag with no epoch (stored before epochs existed) or an epoch the setting no longer holds is flag-off too.
+    let settingUnreadable = false;
+    if (this.state.binding.allowShell && this.adapter.shell) {
+      const verdict = this.gateVerdict(await this.shellGate());
+      if (verdict === "revoke") {
+        if (!this.current(generation)) return null;
+        this.revokeShell(this.chatShellRevoked() ? "chat" : "setting");
+      }
+      settingUnreadable = verdict === "unknown";
+    }
+    this.shellSettingUnreadable = settingUnreadable;
+    // Only a binding that opted in lists plain shell panes; everything else sees `agent.list` exactly as it always did.
+    const shell = this.state.binding.allowShell && this.adapter.shell ? this.adapter.shell : null;
+    if (this.state.binding.occupant?.shell && !shell) {
+      this.freeze("Shell input is turned off", "Shell input is turned off for this conversation; no input will be sent to the shell.");
+      return null;
+    }
+    const agents = await (shell ? this.deps.listAgents(this.signal, { includeShells: true }) : this.deps.listAgents(this.signal));
     if (!this.current(generation) || this.state.outcome !== "active") return null;
     const binding = this.state.binding;
     let agent = agents.find((candidate) => candidate.terminal_id === binding.terminalId);
@@ -382,7 +540,14 @@ export class HerdrHarnessSession {
       this.freeze("History unavailable", "This agent has no readable native history; the conversation is read-only.");
       return null;
     }
-    const result = PaneProcessInfoResultSchema.parse(await this.deps.request("pane.process_info", { pane_id: agent.pane_id }, { signal: this.signal }));
+    let result: PaneProcessInfoResult;
+    try {
+      result = PaneProcessInfoResultSchema.parse(await this.deps.request("pane.process_info", { pane_id: agent.pane_id }, { signal: this.signal }));
+    } catch (error) {
+      // A shell binding reads a failed process lookup as "unknown": prompts are refused and no turn ends early.
+      if (shell && binding.occupant?.shell && !this.isAborted) return this.shellUnknown(agent, seq);
+      throw error;
+    }
     if (!this.current(generation) || this.state.outcome !== "active") return null;
     const process = result.process_info;
     const pid = process.foreground_process_group_id;
@@ -395,6 +560,21 @@ export class HerdrHarnessSession {
       if (seq < this.committedSeq) return this.committed;
       this.state.connected = false;
       this.state.tracker.observeConnectivityLost();
+      return null;
+    }
+    // The plugin setting could not be read: nothing is committed or ended, prompts are refused, and the opt-in is kept.
+    if (shell && settingUnreadable) return this.shellUnknown(agent, seq);
+    // A shell binding (or a first validation that finds an idle shell under the flag) takes the shell path; anything else is the agent path.
+    const firstForeground = shell && !binding.occupant ? await checkedShellForeground(shell, process) : null;
+    if (firstForeground !== null && (!this.current(generation) || this.state.outcome !== "active")) return null;
+    if (shell && (binding.occupant?.shell || firstForeground === "idle")) {
+      return this.validateShell(agent, process, seq, generation, firstForeground);
+    }
+    // A flagged binding to a pane with no detected agent is meant for a shell: anything but an idle prompt is not it,
+    // and must not be bound as an "agent" (the foreground program, e.g. `vim`) with shell input switched on.
+    if (shell && !binding.occupant && !agent.agent) {
+      if (firstForeground === "unknown") return this.shellUnknown(agent, seq);
+      this.freeze("The shell is not at an idle prompt", "Shell input needs the shell at an idle prompt when the conversation opens; another program holds the pane's foreground. Open the conversation again once the command has finished.");
       return null;
     }
     if (!pid || !this.adapter.isOccupant(process)) {
@@ -413,17 +593,82 @@ export class HerdrHarnessSession {
       this.freeze("The bound agent was replaced", "The process-local input identity changed; no input will be sent to the replacement.");
       return null;
     }
-    // A validation that started earlier but finished after a later one must not move the claim or state back. It
-    // returns what the later one committed (the session is still active here, so that commit did not freeze it).
+    return this.commitValidated(agent, process, { pid, tty: process.tty ?? null, instanceId: identity.instanceId }, seq);
+  }
+
+  /** A failed or unreadable process lookup for a shell binding: status `unknown`, nothing committed, nothing ended. */
+  private shellUnknown(agent: AgentInfo, seq: number): AgentInfo {
+    // A late, older validation must not overwrite the status a newer one committed.
+    if (seq >= this.committedSeq) this.state.status = "unknown";
+    // The tracker's own counters, never the listing's synthetic ones: moving them backwards would read the next real observation as an advance.
+    return { ...agent, agent_status: "unknown", state_change_seq: this.shellTrack.seq, completion_seq: this.shellTrack.completion };
+  }
+
+  /**
+   * Validation of a shell binding. The occupant is the shell itself (pid = Herdr's `shell_pid`, start time from `ps`):
+   * the shell exiting, being replaced by another program or by another process freezes it. Idle = the shell owns the foreground;
+   * working = a child owns it. Anything unreadable is `unknown`, which rejects prompts and ends nothing.
+   */
+  private async validateShell(agent: AgentInfo, process: PaneProcessInfo, seq: number, generation: number, known: ShellForeground | null = null): Promise<AgentInfo | null> {
+    const shell = this.adapter.shell!;
+    const binding = this.state.binding;
+    const previous = binding.occupant;
+    const shellPid = process.shell_pid ?? null;
+    const replaced = (description: string) => { this.freeze("The bound shell was replaced", description); return null; };
+    if (agent.agent) return replaced(`Herdr now detects ${agent.agent} in this pane, so it is no longer a plain shell; no input will be sent.`);
+    if (!shellPid) return replaced("The bound shell has exited; no input will be sent.");
+    if (previous && (previous.pid !== shellPid || previous.tty !== (process.tty ?? null))) {
+      return replaced("The pane's shell process changed; no input will be sent to the replacement.");
+    }
+    // `idle` needs `ps` to agree that the shell is alone in its group; it also sees the root processes Herdr hides.
+    const foreground = known ?? await checkedShellForeground(shell, process);
+    if (!this.current(generation) || this.state.outcome !== "active") return null;
+    if (foreground === "exec") return replaced("The shell's process now runs another program; no input will be sent to it.");
+    if (foreground === "unknown") return this.shellUnknown(agent, seq);
+    let identity: { pid: number; instanceId: string };
+    try {
+      identity = await this.adapter.inspectInput({ pid: shellPid, ref: null,
+        pane: { paneId: agent.pane_id, terminalId: agent.terminal_id, process } }, this.signal);
+    } catch (error) {
+      // `ps` failing means the identity cannot be checked, never that the shell was replaced. Before the first commit it fails the open.
+      if (!previous) throw error;
+      return this.isAborted ? null : this.shellUnknown(agent, seq);
+    }
+    if (!this.current(generation) || this.state.outcome !== "active") return null;
+    if (identity.pid !== shellPid || (previous && previous.instanceId !== identity.instanceId)) {
+      return replaced("The shell's start time changed, so it is a different process; no input will be sent to it.");
+    }
+    if (!previous) this.state.tracker.setEvidenceMode("process");
+    const track = this.shellTrack;
+    const status = foreground === "idle" ? "idle" : "working";
+    // The tracker moves only for the observation that commits: an older validation that finished late must not flip it.
+    const observe = (): AgentInfo => {
+      if (track.status !== status) {
+        if (track.status !== null) { track.seq++; if (status === "idle") track.completion++; }
+        track.status = status;
+      }
+      return { ...agent, agent_status: status, state_change_seq: track.seq, completion_seq: track.completion };
+    };
+    return this.commitValidated(observe, process, { pid: shellPid, tty: process.tty ?? null, instanceId: identity.instanceId, shell: true }, seq);
+  }
+
+  /**
+   * Commit a validated observation. A validation that started earlier but finished after a later one must not move the
+   * claim or state back: it returns what the later one committed (the session is still active here, so that commit did not freeze it).
+   */
+  private commitValidated(observed: AgentInfo | (() => AgentInfo), process: PaneProcessInfo, occupant: NonNullable<Binding["occupant"]>, seq: number): AgentInfo | null {
+    const binding = this.state.binding;
+    const previous = binding.occupant;
     if (seq < this.committedSeq) return this.committed;
     this.committedSeq = seq;
+    const agent = typeof observed === "function" ? observed() : observed;
     if (this.deps.claimPane && !this.deps.claimPane(agent.terminal_id)) {
       this.freeze(`This ${this.adapter.label} agent is already open in another conversation`,
         "This conversation is read-only; the other conversation keeps control of the running agent.");
       return null;
     }
     const moved = binding.terminalId !== agent.terminal_id || this.state.paneId !== agent.pane_id;
-    binding.occupant = { pid, tty: process.tty ?? null, instanceId: identity.instanceId };
+    binding.occupant = occupant;
     binding.terminalId = agent.terminal_id;
     this.state.paneId = agent.pane_id;
     this.state.process = process;
