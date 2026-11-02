@@ -235,16 +235,67 @@ describe("processGroupMembers on linux (/proc scan, no ps)", () => {
     expect(await processGroupMembers(100, quick)).toEqual([100, 200]);
   });
 
+  /** A /proc whose stat read of pid 100 stays pending until `release()`; everything else answers at once. */
+  const hangingProc = () => {
+    const { promise, resolve } = Promise.withResolvers<string>();
+    const readFile = vi.fn<ProcessIdentityDeps["readFile"]>((path) => path === "/proc/self/mountinfo" ? Promise.resolve(NORMAL_MOUNTINFO) : promise);
+    const readdir = vi.fn<ProcessIdentityDeps["readdir"]>(async () => ["100"]);
+    const deps = { readFile, readdir, execFile: vi.fn<ProcessIdentityDeps["execFile"]>(), platform: "linux" as const };
+    return { readFile, readdir, deps, release: () => resolve(procStat(100, 100)) };
+  };
+
   it("fails closed when a /proc read never returns (real 2 s timer)", async () => {
     vi.useFakeTimers();
+    const stuck = hangingProc();
     try {
-      const stuck = { ...fakeProc({ "100": procStat(100, 100) }).deps, readFile: (path: string) => path === "/proc/self/mountinfo" ? Promise.resolve(NORMAL_MOUNTINFO) : new Promise<string>(() => {}) };
-      const outcome = expect(processGroupMembers(100, stuck)).rejects.toThrow(/exceeded 2000 ms/);
+      const outcome = expect(processGroupMembers(100, stuck.deps)).rejects.toThrow(/exceeded 2000 ms/);
       await vi.advanceTimersByTimeAsync(2001);
       await outcome;
     } finally {
       vi.useRealTimers();
+      stuck.release();
     }
+  });
+
+  it("is single-flight: while a timed-out scan is still pending no new scan starts reads; once the stuck read settles the next scan works", async () => {
+    vi.useFakeTimers();
+    const stuck = hangingProc();
+    try {
+      const first = expect(processGroupMembers(100, stuck.deps)).rejects.toThrow(/exceeded 2000 ms/);
+      await vi.advanceTimersByTimeAsync(2001);
+      await first;
+      const readsBefore = stuck.readFile.mock.calls.length;
+      const listsBefore = stuck.readdir.mock.calls.length;
+
+      const fresh = fakeProc({ "100": procStat(100, 100) });
+      await expect(processGroupMembers(100, fresh.deps)).rejects.toThrow(/previous \/proc scan still running/);
+      await expect(processGroupMembers(100, stuck.deps)).rejects.toThrow(/previous \/proc scan still running/);
+      expect(fresh.readFile).not.toHaveBeenCalled();
+      expect(fresh.readdir).not.toHaveBeenCalled();
+      expect(stuck.readFile.mock.calls.length).toBe(readsBefore);
+      expect(stuck.readdir.mock.calls.length).toBe(listsBefore);
+
+      stuck.release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await processGroupMembers(100, fresh.deps)).toEqual([100]);
+    } finally {
+      vi.useRealTimers();
+      stuck.release();
+    }
+  });
+
+  it("a normal scan leaves nothing pending: scans in a row, and ones that overlap, all work", async () => {
+    const entries = { "100": procStat(100, 100), "200": procStat(200, 100) };
+    expect(await processGroupMembers(100, fakeProc(entries).deps)).toEqual([100, 200]);
+    expect(await processGroupMembers(100, fakeProc(entries).deps)).toEqual([100, 200]);
+    const both = await Promise.all([processGroupMembers(100, fakeProc(entries).deps), processGroupMembers(200, fakeProc(entries).deps)]);
+    expect(both).toEqual([[100, 200], []]);
+  });
+
+  it("a scan that fails by itself (not a timeout) does not block the next one", async () => {
+    const { deps } = fakeProc({ "100": Object.assign(new Error("EACCES"), { code: "EACCES" }) });
+    await expect(processGroupMembers(100, deps)).rejects.toThrow(/EACCES/);
+    expect(await processGroupMembers(100, fakeProc({ "100": procStat(100, 100) }).deps)).toEqual([100]);
   });
 
   it("the macOS path still runs ps, never /proc", async () => {

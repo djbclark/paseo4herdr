@@ -13,6 +13,8 @@ export interface ProcessIdentityDeps {
 }
 
 const PS_TIMEOUT_MS = 2000;
+/** The Linux `/proc` scan that timed out and has not settled yet; see `processGroupMembers`. */
+let stuckScan: Promise<void> | undefined;
 /** Absolute, not via PATH. Used on macOS only: Linux reads `/proc`, which needs no `ps` binary. */
 const PS_PATH = "/bin/ps";
 /** C-locale `ps -o lstart=`: `Thu Oct 30 22:13:44 2026` (day space-padded). Anything else (e.g. `?` for a process ps cannot inspect) is not an identity. */
@@ -115,8 +117,9 @@ function assertProcFullyVisible(mountinfo: string): void {
  * - Linux: a scan of `/proc/[0-9]*` stat files (field 5), so no `ps` binary is needed. The stat files are world-readable,
  *   but `/proc` mounted with `hidepid` (or `subset=pid`) hides other users' processes: the scan would then miss `sudo`
  *   and look alone, so `/proc/self/mountinfo` is checked first and a `hidepid`/`subset=pid` mount throws. The scan has the
- *   same 2 s deadline as `ps`. A pid that vanishes mid-scan is skipped; any other read error, an unparseable stat or an
- *   empty `/proc` throws.
+ *   same 2 s deadline as `ps`; a scan that timed out on a read that never returns blocks new scans (each throws) until that
+ *   read settles, so stuck reads cannot pile up on libuv's worker threads. A pid that vanishes mid-scan is skipped; any
+ *   other read error, an unparseable stat or an empty `/proc` throws.
  * Throws on any failure, an empty answer or any unparseable entry: callers read a throw as "unknown", never as "the group is alone".
  */
 export async function processGroupMembers(pgid: number, deps: Partial<ProcessIdentityDeps> = {}): Promise<number[]> {
@@ -141,10 +144,14 @@ export async function processGroupMembers(pgid: number, deps: Partial<ProcessIde
       if (rows === 0) throw new Error("/proc listed no processes");
       return members;
     };
-    // The per-entry check cannot interrupt a read that never returns; the timer does.
+    // The per-entry check cannot interrupt a read that never returns; the timer does. That read still holds a libuv
+    // worker, so while a timed-out scan has not settled no new one starts (each would pin another worker).
+    if (stuckScan) throw new Error("previous /proc scan still running");
+    const running = scan();
+    const marker: Promise<void> = running.then(() => {}, () => {}).then(() => { if (stuckScan === marker) stuckScan = undefined; });
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(expired()), PS_TIMEOUT_MS); });
-    try { return await Promise.race([scan(), timeout]); } finally { clearTimeout(timer); }
+    const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => { stuckScan = marker; reject(expired()); }, PS_TIMEOUT_MS); });
+    try { return await Promise.race([running, timeout]); } finally { clearTimeout(timer); }
   }
   const { stdout } = await run(PS_PATH, ["-A", "-o", "pid=,pgid="], { timeout: PS_TIMEOUT_MS, env: { ...process.env, LC_ALL: "C" } });
   for (const line of stdout.split("\n")) {
