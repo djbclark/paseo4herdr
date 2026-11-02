@@ -85,3 +85,21 @@ describe("createShellEpochCache", () => {
     expect(cache.now()).toBe("unknown");
   });
 });
+
+describe("createShellEpochCache read ordering", () => {
+  it("a read that started before a notification does not overwrite it, and still returns the value it read", async () => {
+    const listeners = new Set<(state: State) => void | Promise<void>>();
+    let finish!: (state: State) => void;
+    const settings: GateSettings = {
+      read: () => new Promise<State>((resolve) => { finish = resolve; }),
+      subscribe: (listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
+    };
+    const cache = createShellEpochCache(settings);
+    const pending = cache.read();
+    for (const listener of listeners) void listener(ready(false, 1700));
+    expect(cache.now()).toBeNull();
+    finish(ready(true, 1700));
+    await expect(pending).resolves.toBe(1700);
+    expect(cache.now()).toBeNull();
+  });
+});

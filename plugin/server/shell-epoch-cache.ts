@@ -24,16 +24,23 @@ export interface ShellEpochCache {
  */
 export function createShellEpochCache(settings: GateSettings): ShellEpochCache {
   let gate: ShellGate = "unknown";
-  const stopWatching = settings.subscribe((state) => { gate = state.status === "ready" ? shellGateEpoch(state.values) : "unknown"; });
+  /** Bumped by every notification. A read that started before one may be older than it, so it must not overwrite it. */
+  let notifications = 0;
+  const stopWatching = settings.subscribe((state) => {
+    notifications++;
+    gate = state.status === "ready" ? shellGateEpoch(state.values) : "unknown";
+  });
   return {
     async read() {
+      const before = notifications;
       try {
         const state = await settings.read();
         if (state.status === "invalid") throw new Error(state.error);
-        gate = shellGateEpoch(state.values);
-        return gate;
+        const value = shellGateEpoch(state.values);
+        if (notifications === before) gate = value;
+        return value;
       } catch (error) {
-        gate = "unknown";
+        if (notifications === before) gate = "unknown";
         throw error;
       }
     },
