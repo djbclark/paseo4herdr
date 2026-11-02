@@ -45,7 +45,7 @@ afterEach(() => { for (const session of sessions.splice(0)) session.close(); vi.
 /** One Herdr stand-in: a plain shell pane that only `listAgents({includeShells})` can see, a mutable foreground and a request log. */
 /** `bindingEpoch`: the epoch the persisted flag opted in under (null = none stored); `settingEpoch`: the epoch the plugin setting holds now. */
 async function world(options: { allowShell?: boolean; setting?: boolean; unreadable?: boolean; revoked?: boolean; process?: PaneProcessInfo; env?: Record<string, string>; bindingEpoch?: number | null; settingEpoch?: number } = {}) {
-  const state = { setting: options.setting ?? true, unreadable: options.unreadable ?? false, epoch: options.settingEpoch ?? EPOCH, holdText: null as Promise<void> | null, onClear: null as (() => void) | null, holdRead: null as Promise<void> | null, holdInfo: null as { nth: number; promise: Promise<void>; seen: number } | null, process: options.process ?? idle(), sendText: null as Error | null, sendKeys: null as Error | null, clearKeys: null as Error | null, processInfo: null as Error | null };
+  const state = { revoked: options.revoked === true, setting: options.setting ?? true, unreadable: options.unreadable ?? false, epoch: options.settingEpoch ?? EPOCH, holdText: null as Promise<void> | null, onClear: null as (() => void) | null, holdRead: null as Promise<void> | null, holdInfo: null as { nth: number; promise: Promise<void>; seen: number } | null, process: options.process ?? idle(), sendText: null as Error | null, sendKeys: null as Error | null, clearKeys: null as Error | null, processInfo: null as Error | null };
   const log: Array<{ method: string; params?: Record<string, unknown> }> = [];
   const listCalls: Array<{ includeShells?: boolean } | undefined> = [];
   const events: ProviderEvent[] = [];
@@ -78,7 +78,7 @@ async function world(options: { allowShell?: boolean; setting?: boolean; unreada
     emit: (event) => events.push(event),
     shellEpoch: async () => { if (state.unreadable) throw new Error("EIO: settings unreadable"); return state.setting ? state.epoch : null; },
     shellEpochNow: () => state.unreadable ? "unknown" : state.setting ? state.epoch : null,
-    shellRevoked: () => options.revoked === true,
+    shellRevoked: () => state.revoked,
   });
   sessions.push(session);
   await session.open({ cwd: "/work", env: options.env ?? {}, mcpServers: {}, settings: {}, persist: true }, "skip");
@@ -570,8 +570,7 @@ describe("review fix P2-3: the plugin setting is the global gate", () => {
     const { session, writes, events, listCalls } = await world({ allowShell: true, setting: false });
     expect(session.state.outcome).toBe("readonly");
     expect(session.state.binding.allowShell).toBeUndefined();
-    expect(noticeDescriptions(events)).toEqual(["Shell input is turned off in the Herdr plugin settings; no input will be sent to the shell."]);
-    expect(listCalls.every((call) => call === undefined)).toBe(true); // shells are not even listed
+        expect(listCalls.every((call) => call === undefined)).toBe(true); // shells are not even listed
     const persisted = events.filter((e) => e.type === "session.persistence").at(-1);
     expect(persisted && "persistence" in persisted && (persisted.persistence.data as Record<string, unknown>).allowShell).toBeUndefined();
     await session.prompt(prompt("p1"));
@@ -591,13 +590,27 @@ describe("review fix P2-3: the plugin setting is the global gate", () => {
   });
 
   it("a revocation made while the chat was closed clears the flag at the next open", async () => {
-    const { session, writes, events } = await world({ allowShell: true, revoked: true, env: { PASEO_AGENT_ID: "agent-r" } });
+    const { session, writes } = await world({ allowShell: true, revoked: true, env: { PASEO_AGENT_ID: "agent-r" } });
     expect(session.state.outcome).toBe("readonly");
     expect(session.state.binding.allowShell).toBeUndefined();
-    // Only this chat's flag was turned off; the plugin setting is still on, so the notice must not blame it.
-    expect(noticeDescriptions(events)).toEqual(["Shell input is turned off for this conversation; no input will be sent to the shell."]);
     await session.prompt(prompt("p1"));
     expect(writes()).toEqual([]);
+  });
+
+  it("the freeze notice names the plugin setting when the setting was switched off", async () => {
+    const { session, state, events } = await world({ allowShell: true });
+    state.setting = false;
+    await session.live.reconcile();
+    expect(session.state.outcome).toBe("readonly");
+    expect(noticeDescriptions(events)).toEqual(["Shell input is turned off in the Herdr plugin settings; no input will be sent to the shell."]);
+  });
+
+  it("the freeze notice says 'for this conversation', not 'plugin settings', when only this chat's flag was turned off and the setting is still on", async () => {
+    const { session, state, events } = await world({ allowShell: true, env: { PASEO_AGENT_ID: "agent-r" } });
+    state.revoked = true;
+    await session.live.reconcile();
+    expect(session.state.outcome).toBe("readonly");
+    expect(noticeDescriptions(events)).toEqual(["Shell input is turned off for this conversation; no input will be sent to the shell."]);
   });
 
   async function rpcOf(setting: boolean) {
