@@ -28,7 +28,7 @@ afterEach(async () => {
 const paneRow = { pane_id: "pane-shell", terminal_id: "t-shell", workspace_id: "w", tab_id: "t", focused: true, agent: null, agent_status: "unknown", revision: 1, cwd: "/work" };
 const agentRow = { terminal_id: "t-shell", pane_id: "pane-shell", agent: "grok", name: null, agent_status: "idle", workspace_id: "w", tab_id: "t", focused: true, revision: 1, cwd: "/work" };
 
-async function rig(listedAgents: unknown[] = [], shellAllowed = true) {
+async function rig(listedAgents: unknown[] = [], shellAllowed: boolean | Error = true) {
   directory = await mkdtemp(join(tmpdir(), "herdr-shell-bind-"));
   const socket = join(directory, "herdr.sock");
   const sent: Array<{ method: string; params: Record<string, unknown> }> = [];
@@ -55,7 +55,7 @@ async function rig(listedAgents: unknown[] = [], shellAllowed = true) {
     });
   });
   await new Promise<void>((resolve) => server?.listen(socket, resolve));
-  const provider = createHerdrProvider(genericAdapter, async () => socket, { getHerdrSession: () => null, bindHistoryDelayMs: 60_000, shellEpoch: async () => shellAllowed ? 7 : null });
+  const provider = createHerdrProvider(genericAdapter, async () => socket, { getHerdrSession: () => null, bindHistoryDelayMs: 60_000, shellEpoch: async () => { if (shellAllowed instanceof Error) throw shellAllowed; return shellAllowed ? 7 : null; } });
   const connection = await provider.connect({ versions: [1], capabilities: ["session.list", "session.persistence", "prompt.message"] });
   connections.push(connection);
   const events: ProviderEvent[] = [];
@@ -97,6 +97,15 @@ it("allowShell on a pane where Herdr detects an agent is refused", async () => {
   const { open, failure } = await rig([agentRow]);
   await open("open", bound({ allowShell: true }));
   expect(await failure("open")).toMatch(/shell input applies only to plain shell panes/);
+});
+
+it("allowShell at bind says the setting could not be read, not that it is off, when the read fails; nothing is listed", async () => {
+  const { sent, open, failure } = await rig([], new Error("EIO"));
+  await open("open", bound({ allowShell: true }));
+  const message = await failure("open");
+  expect(message).toMatch(/could not be read.*EIO.*try again/);
+  expect(message).not.toMatch(/turned off/);
+  expect(sent.some((request) => request.method === "pane.list" || request.method.startsWith("pane.send"))).toBe(false);
 });
 
 it("allowShell is refused at bind while the plugin setting is off, and the shell pane is not even listed", async () => {

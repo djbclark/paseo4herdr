@@ -88,6 +88,7 @@ async function world(options: { allowShell?: boolean; setting?: boolean; unreada
   const advance = (ms: number) => { vi.setSystemTime(Date.now() + ms); };
   return { session, state, log, events, listCalls, count, writes, advance };
 }
+const noticeDescriptions = (events: ProviderEvent[]) => events.flatMap((e) => e.type === "session.notice" && e.notice.title === "Shell input is turned off" ? [e.notice.description] : []);
 const noticeTitles = (events: ProviderEvent[]) => events.flatMap((e) => e.type === "session.notice" ? [e.notice.title] : []);
 const promptResults = (events: ProviderEvent[]) => events.flatMap((e) => e.type === "session.prompt_result" ? [`${e.clientMessageId}:${e.result.type}`] : []);
 const turnStates = (events: ProviderEvent[]) => events.flatMap((e) => e.type === "session.turn" ? [e.state] : []);
@@ -569,6 +570,7 @@ describe("review fix P2-3: the plugin setting is the global gate", () => {
     const { session, writes, events, listCalls } = await world({ allowShell: true, setting: false });
     expect(session.state.outcome).toBe("readonly");
     expect(session.state.binding.allowShell).toBeUndefined();
+    expect(noticeDescriptions(events)).toEqual(["Shell input is turned off in the Herdr plugin settings; no input will be sent to the shell."]);
     expect(listCalls.every((call) => call === undefined)).toBe(true); // shells are not even listed
     const persisted = events.filter((e) => e.type === "session.persistence").at(-1);
     expect(persisted && "persistence" in persisted && (persisted.persistence.data as Record<string, unknown>).allowShell).toBeUndefined();
@@ -589,9 +591,11 @@ describe("review fix P2-3: the plugin setting is the global gate", () => {
   });
 
   it("a revocation made while the chat was closed clears the flag at the next open", async () => {
-    const { session, writes } = await world({ allowShell: true, revoked: true, env: { PASEO_AGENT_ID: "agent-r" } });
+    const { session, writes, events } = await world({ allowShell: true, revoked: true, env: { PASEO_AGENT_ID: "agent-r" } });
     expect(session.state.outcome).toBe("readonly");
     expect(session.state.binding.allowShell).toBeUndefined();
+    // Only this chat's flag was turned off; the plugin setting is still on, so the notice must not blame it.
+    expect(noticeDescriptions(events)).toEqual(["Shell input is turned off for this conversation; no input will be sent to the shell."]);
     await session.prompt(prompt("p1"));
     expect(writes()).toEqual([]);
   });

@@ -424,8 +424,7 @@ export class HerdrHarnessSession {
 
   /** The gate as read now: null when revoked while the conversation was closed or the setting is off or has no epoch, `"unknown"` when the setting could not be read. */
   private async shellGate(): Promise<ShellGate> {
-    const agentId = this.paseoAgentId;
-    if (agentId && this.deps.shellRevoked?.(agentId)) return null;
+    if (this.chatShellRevoked()) return null;
     try { return (await this.deps.shellEpoch?.()) ?? null; } catch { return "unknown"; }
   }
 
@@ -442,15 +441,24 @@ export class HerdrHarnessSession {
   /** True while the last validation could not read the plugin setting: shell input is refused, but it was not turned off and no opt-in was forgotten. */
   shellSettingUnreadable = false;
 
-  /** Cut the shell opt-in off for good: forget the persisted flag and its epoch (turning the setting back on re-arms nothing) and freeze. */
-  private revokeShell(): void {
+  /** True when this chat's flag was turned off through `herdr.chat.allow-shell` while it was closed (the plugin setting may still be on). */
+  private chatShellRevoked(): boolean {
+    const agentId = this.paseoAgentId;
+    return Boolean(agentId && this.deps.shellRevoked?.(agentId));
+  }
+
+  /**
+   * Cut the shell opt-in off for good: forget the persisted flag and its epoch (turning the setting back on re-arms nothing) and freeze.
+   * `cause` names what was turned off in the notice: only this chat's flag, or the plugin setting.
+   */
+  private revokeShell(cause: "chat" | "setting"): void {
     const binding = this.state.binding;
     if (binding.allowShell || binding.allowShellEpoch !== undefined) {
       delete binding.allowShell;
       delete binding.allowShellEpoch;
       this.persist();
     }
-    if (binding.occupant?.shell) this.freeze("Shell input is turned off", "Shell input is turned off in the Herdr plugin settings; no input will be sent to the shell.");
+    if (binding.occupant?.shell) this.freeze("Shell input is turned off", `Shell input is turned off ${cause === "chat" ? "for this conversation" : "in the Herdr plugin settings"}; no input will be sent to the shell.`);
   }
 
   /** The conversation is the one that admitted the prompt and its flag is still on. The kill switch and every revocation clear the flag and bump the generation synchronously, so this sees them. */
@@ -467,7 +475,7 @@ export class HerdrHarnessSession {
     const cached = this.deps.shellEpochNow;
     if (!cached) return true;
     const verdict = this.gateVerdict(cached());
-    if (verdict === "revoke") this.revokeShell();
+    if (verdict === "revoke") this.revokeShell("setting");
     return verdict === "open";
   }
 
@@ -475,7 +483,7 @@ export class HerdrHarnessSession {
   async shellStillAllowed(generation: number): Promise<boolean> {
     if (!this.shellFlagOn(generation)) return false;
     const verdict = this.gateVerdict(await this.shellGate());
-    if (verdict === "revoke" && this.current(generation)) this.revokeShell();
+    if (verdict === "revoke" && this.current(generation)) this.revokeShell(this.chatShellRevoked() ? "chat" : "setting");
     return verdict === "open" && this.shellAllowedNow(generation);
   }
 
@@ -489,7 +497,7 @@ export class HerdrHarnessSession {
       const verdict = this.gateVerdict(await this.shellGate());
       if (verdict === "revoke") {
         if (!this.current(generation)) return null;
-        this.revokeShell();
+        this.revokeShell(this.chatShellRevoked() ? "chat" : "setting");
       }
       settingUnreadable = verdict === "unknown";
     }
