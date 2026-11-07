@@ -121,6 +121,24 @@ The project was renamed from `paseo-herdr`. The plugin id (`herdr-harness`), the
 3. Restart your OMP agents. OMP loads extensions only at startup.
 4. Check the result. From a clone of this repository, `node plugin/scripts/install-omp-companion.mjs --print-path` prints where the companion belongs; confirm `paseo4herdr-input.ts` is there and `paseo-herdr-input.ts` is gone. On the **Herdr** screen, an agent that loaded the new companion has no "Read-only" line. While the old file is still present, the `OMP (Herdr)` provider status reports "OMP input companion is outdated". See [Verify the install](docs/TROUBLESHOOTING.md#verify-the-install).
 
+
+## Upstream / prior art
+
+1. Forked from [sdananjay/paseo-herdr](https://github.com/sdananjay/paseo-herdr).
+2. Upstream Herdr: [herdrdev/herdr](https://github.com/herdrdev/herdr).
+
+
+## Related djbclark Herdr repos
+
+| Repo | Role |
+| --- | --- |
+| [djbclark/herdr](https://github.com/djbclark/herdr) | Fork of [herdrdev/herdr](https://github.com/herdrdev/herdr) |
+| [herdr-plain-line](https://github.com/djbclark/herdr-plain-line) | Local plugin: plain-English popup for tab/workspace rename and create |
+| [herdr-sleeper](https://github.com/djbclark/herdr-sleeper) | Plugin: sleep idle agent panes, wake later |
+| [herdr4paseo](https://github.com/djbclark/herdr4paseo) | Terminal UI to watch/steer a Paseo agent from a pane |
+| [paseo4herdr](https://github.com/djbclark/paseo4herdr) | Paseo plugin mirroring OMP agents that run in Herdr |
+
+
 ## License
 
 [MIT](LICENSE)
