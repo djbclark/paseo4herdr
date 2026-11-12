@@ -74,6 +74,37 @@ export const overviewAgentSchema = z.object({
   inputReady: z.boolean().nullable(),
   /** An in-place restart (same pane and session) is possible for this harness and agent. */
   canRestart: z.boolean(),
+  /**
+   * Everything below is defaulted: a daemon that predates it omits it, and the overview still parses (the client then
+   * shows no time or pane number for that agent; it never invents one).
+   */
+  /** Herdr's 1-based pane number within its tab (position in `pane.list` when Herdr sends no number); null when unknown. */
+  paneNumber: z.number().int().nullable().default(null),
+  /** ISO. Newest of the transcript's last message, the session file's mtime, and the Paseo chat's last activity. */
+  lastActivityAt: z.string().nullable().default(null),
+  lastActivitySource: z.enum(["transcript", "session-file", "chat"]).nullable().default(null),
+  /** ISO. When the plugin saw the status or `state_change_seq` change; a lower bound unless `stateChangedExact`. */
+  stateChangedAt: z.string().nullable().default(null),
+  /** False = the plugin has only watched since `stateChangedAt`, so the real change was at or before it. */
+  stateChangedExact: z.boolean().default(false),
+  stateChangeSeq: z.number().int().nonnegative().default(0),
+  /** ISO, from the session file's header. */
+  sessionStartedAt: z.string().nullable().default(null),
+  /** ISO, from the newest assistant message in the transcript. */
+  lastAssistantAt: z.string().nullable().default(null),
+  /** `provider/id` as the harness recorded it. */
+  model: z.string().nullable().default(null),
+  /**
+   * Prompt-cache estimate. Present only for a model whose provider prefix is `anthropic/`; null for any other or unknown
+   * model. `anchorAt` is the last API request (newest of the last assistant and user/tool-result message), null when the
+   * transcript gave no message time. `ttlKnown` is false unless the harness config proves 1-hour retention.
+   */
+  cache: z.object({
+    provider: z.literal("anthropic"),
+    anchorAt: z.string().nullable(),
+    ttlSec: z.number().int().positive(),
+    ttlKnown: z.boolean(),
+  }).nullable().default(null),
 });
 export type OverviewAgent = z.infer<typeof overviewAgentSchema>;
 
@@ -131,11 +162,16 @@ export const herdrOverviewRpc = defineRpc({
     /**
      * OMP input companion install state; the client warns on anything but `current` while OMP is enabled.
      * The server always sends it. The client parses every overview against this schema, so a field the running daemon
-     * lacks fails the whole call unless it is optional or defaulted. Only `companion` and each agent's `duplicateChatIds`
-     * are tolerant here (a daemon without them still shows the overview, without a banner or duplicate cleanup), and
-     * `herdr.autoStarted` in the diagnostics; any other newer required field still breaks a client against an older daemon.
+     * lacks fails the whole call unless it is optional or defaulted. Only `companion`, `serverNow`, `statePollMs`, each
+     * agent's `duplicateChatIds` and each agent's time, pane, model and cache fields are tolerant here (a daemon without
+     * them still shows the overview, without a banner, duplicate cleanup or times), and `herdr.autoStarted` in the
+     * diagnostics; any other newer required field still breaks a client against an older daemon.
      */
     companion: companionStatusSchema.optional(),
+    /** ISO, the daemon's clock when it built this answer; the client corrects its own clock skew with it. */
+    serverNow: z.string().optional(),
+    /** How often the plugin samples Herdr for state changes; state times are only accurate to about this. */
+    statePollMs: z.number().int().optional(),
     /** Empty when the connection is unavailable. */
     workspaces: z.array(overviewWorkspaceSchema),
     /** Linking Herdr agents to Paseo chats failed; agents still show, but "Open chat" may be missing. */

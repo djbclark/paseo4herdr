@@ -1,6 +1,8 @@
 import { COMPANION_INSTALL_NAME, COMPANION_INSTALL_STEP, LEGACY_COMPANION_NAME } from "../shared/companion.js";
 import { cleanTitle } from "../shared/labels.js";
 import type { CompanionStatus, Diagnostics, HerdrAgentStatus, HerdrTarget } from "../shared/rpc.js";
+import type { FlatAgent } from "./sort.js";
+import { agoText, cacheSpeech, spoken, type CacheState } from "./time.js";
 
 /** Pure helpers for the Herdr client UI (no React, no React Native). */
 
@@ -31,6 +33,43 @@ export function withShellSwitch<T extends { allowShell: boolean; allowShellEpoch
 
 export function statusLabel(status: HerdrAgentStatus): string {
   return STATUS_LABELS[status];
+}
+
+/** Status is never colour alone: each has a glyph and a word. */
+const STATUS_GLYPHS: Record<HerdrAgentStatus, string> = { working: "▶", blocked: "!", done: "✓", idle: "○", unknown: "?" };
+
+export function statusGlyph(status: HerdrAgentStatus): string {
+  return STATUS_GLYPHS[status];
+}
+
+/**
+ * The place line: `W2 api-server › T3 tests › P1`. In a grouped card the workspace is the card header, so the `W` part drops.
+ * A pane number Herdr didn't give is left out; the raw pane id lives in the details sheet.
+ */
+export function placeText(item: Pick<FlatAgent, "workspace" | "tab"> & { agent: { paneNumber: number | null } }, grouped: boolean): string {
+  const parts = [`T${item.tab.number} ${item.tab.label}`.trim()];
+  if (item.agent.paneNumber !== null) parts.push(`P${item.agent.paneNumber}`);
+  if (!grouped) parts.unshift(`W${item.workspace.number} ${item.workspace.label}`.trim());
+  return parts.join(" › ");
+}
+
+/** One sentence for screen readers. Built on the coarse tick only, so it doesn't change every second. */
+export function agentSpeech(item: FlatAgent, label: string, cache: CacheState, nowMs: number): string {
+  const { agent } = item;
+  const parts = [label, statusLabel(agent.status).toLowerCase()];
+  if (agent.harness) parts.push(agent.harness);
+  parts.push(`workspace ${item.workspace.number} ${item.workspace.label}`, `tab ${item.tab.number} ${item.tab.label}`);
+  if (agent.paneNumber !== null) parts.push(`pane ${agent.paneNumber}`);
+  const active = agoText(agent.lastActivityAt, nowMs, false);
+  if (active && active !== "<1m") parts.push(`active ${spokenAgo(agent.lastActivityAt, nowMs)}`);
+  else if (active) parts.push("active less than a minute ago");
+  const cacheSentence = cacheSpeech(cache);
+  if (cacheSentence) parts.push(cacheSentence);
+  return parts.join(", ");
+}
+
+function spokenAgo(iso: string | null, nowMs: number): string {
+  return `${spoken((nowMs - Date.parse(iso ?? "")) / 1000)} ago`;
 }
 
 export type StatusTone = "success" | "warning" | "danger" | "muted" | "accent";

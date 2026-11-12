@@ -7,6 +7,7 @@ This is an alpha release.
 ## What you get
 
 - A **Herdr** screen in the sidebar that lists your live Herdr agents, grouped by workspace, with live status. Tap an agent to open its chat. An agent without a chat gets one attached to the same running process, with its earlier conversation.
+- Each agent row shows its Herdr workspace, tab and pane, its state, and times: last activity, how long it has been in its state, when its session started, and (for Anthropic models only) an estimated prompt-cache expiry marked "est.". Sort by any of these or by status, title, harness, model, folder and more, grouped by workspace or as one flat list. Times the plugin can't know are left blank; "state changed" counts from when the plugin first saw the agent and shows as "≥ 52m" until it has seen a change.
 - **OMP (Herdr)** as a provider. Import a running agent through Import session, or start a new agent from the agent form or the Herdr screen. Each new agent gets its own Herdr tab.
 - Prompts from Paseo go to the running OMP process. Prompts typed in the terminal show up in the Paseo chat. Stop in Paseo aborts the turn and leaves OMP running.
 - Model and thinking level changes from Paseo apply to the same OMP session.
@@ -33,6 +34,7 @@ Installing or updating this plugin writes one file, `paseo4herdr-input.ts`, into
 - No token streaming. OMP writes complete messages, so replies appear a message at a time.
 - Herdr agents also appear in their normal Paseo workspaces. Paseo has no way for a plugin to hide them.
 - Import a Herdr agent only through **OMP (Herdr)**. Importing it through Paseo's built-in OMP plugin as well starts a second OMP process on the same session file.
+- The cache countdown is an estimate from the last message time and Anthropic's default 5-minute lifetime; it is hidden for other models. State times are good to about 5 seconds and are lost when the daemon restarts. The sort choice is stored per host, so every device on that host shares it.
 - Refresh agent during a running turn stops that turn.
 - `/new` and `/resume` in the terminal freeze the current Paseo chat. Open the new conversation from the Herdr screen.
 - Stopping the Herdr server stops its agents. Open chats go read-only, and tapping the agent opens a new chat.

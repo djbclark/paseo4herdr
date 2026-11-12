@@ -20,6 +20,7 @@ import { type AgentInfo, type PaneProcessInfo, PaneProcessInfoResultSchema, Pane
 import type { ReadyTarget } from "./herdr/target.js";
 import type { HarnessAdapter } from "./harness/types.js";
 import { adapterAcceptsKind, createResolver, type AdapterResolver } from "./harness/resolve.js";
+import { StateStamper, TranscriptSummaryCache, EMPTY_SUMMARY, cacheInfo, laterIso, pickLastActivity, type TranscriptSummary } from "./activity.js";
 
 export interface ManagementDeps {
   /**
@@ -51,6 +52,15 @@ export interface ManagementDeps {
   env?: Readonly<Record<string, string | undefined>>;
   /** Reads the OMP input companion's install state. Required so tests inject a fake and never read the real home. */
   companionStatus(): Promise<{ state: "current" | "outdated" | "missing" | "foreign"; path: string }>;
+  /**
+   * How often a server-side loop samples Herdr to stamp status changes (ms). Absent = no loop, so no agent has a
+   * state-change time. The loop starts with the first overview call and never starts Herdr.
+   */
+  statePollMs?: number;
+  /** Tests: a transcript summary cache to inspect; defaults to a fresh one. */
+  transcripts?: TranscriptSummaryCache;
+  /** Tests: the clock, in ms. */
+  now?: () => number;
 }
 
 /** First executable `herdr` on PATH. Paseo terminals run commands without a shell, so pass an absolute path. */
@@ -244,12 +254,56 @@ function ownerAdapter(
   return ((owner && resolver.byId(owner.harnessId)) ?? resolver.select(agent.agent)) ?? undefined;
 }
 
-export function registerManagementRpcs(server: Pick<PluginServerContext, "handle">, deps: ManagementDeps): void {
+export function registerManagementRpcs(server: Pick<PluginServerContext, "handle">, deps: ManagementDeps): () => void {
   const request = deps.request ?? ((socketPath, method, params) => new HerdrClient(socketPath).request(method, params));
   const check = deps.checkDirectory ?? checkDirectory;
   const home = () => (deps.homedir ?? homedir)();
   const resolver = deps.resolver ?? createResolver(deps.harnesses);
   const targets = (socketPath: string) => (method: string, params?: Record<string, unknown>) => request(socketPath, method, params);
+  const now = deps.now ?? Date.now;
+  const transcripts = deps.transcripts ?? new TranscriptSummaryCache();
+  const stamper = new StateStamper();
+
+  /** One sample of Herdr's agent list for the state-change stamps. Never starts Herdr; a failed sample changes nothing. */
+  const sampleStates = async (): Promise<void> => {
+    try {
+      const { target } = await deps.readTarget();
+      await deps.ensureReady({ ...target, autoStart: false, autoStartDisabledReason: "This check never starts Herdr" });
+      const agents = await listPaneTargets(targets(target.socketPath));
+      const at = now();
+      for (const agent of agents) stamper.observe(chatKey(target.herdrSession, agent.terminal_id), agent.agent_status, agent.state_change_seq, at);
+      stamper.retain(new Set(agents.map((agent) => chatKey(target.herdrSession, agent.terminal_id))));
+    } catch {
+      // Herdr is down or busy: keep the stamps; a restart shows up as a changed or reset sequence on the next good sample.
+    }
+  };
+  let pollTimer: ReturnType<typeof setInterval> | undefined;
+  let sampling = false;
+  const sampleOnce = async (): Promise<void> => {
+    if (sampling) return;
+    sampling = true;
+    try { await sampleStates(); } finally { sampling = false; }
+  };
+  /** Starts the loop on first use and waits for its first sample, so the first overview already has first-sight stamps. */
+  const ensureStatePoll = async (): Promise<void> => {
+    if (!deps.statePollMs || pollTimer) return;
+    pollTimer = setInterval(() => { void sampleOnce(); }, deps.statePollMs);
+    pollTimer.unref?.();
+    await sampleOnce();
+  };
+
+  interface AgentFacts {
+    summary: TranscriptSummary;
+    lastActivity: ReturnType<typeof pickLastActivity>;
+  }
+  /** Session-file facts for one agent; a missing or unreadable file is just "no facts". */
+  const readFacts = async (agent: AgentInfo, chatAt: string | null): Promise<AgentFacts> => {
+    const session = agent.agent_session;
+    const read = session?.kind === "path" ? await transcripts.read(session.value).catch(() => null) : null;
+    const summary = read?.summary ?? EMPTY_SUMMARY;
+    const transcriptAt = laterIso(summary.lastAssistantAt, summary.lastUserAt);
+    return { summary, lastActivity: pickLastActivity({ transcriptAt, fileMtime: read?.mtime ?? null, chatAt }) };
+  };
 
   /** Folders Herdr's workspaces and agents are in on the configured target; empty when Herdr is unavailable. */
   const herdrFolders = async (): Promise<string[]> => {
@@ -314,6 +368,7 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
 
   server.handle(herdrOverviewRpc, async ({ noAutoStart }, { paseo }) => {
     const { target, ompEnabled, enabled: enabledFor } = await deps.readTarget();
+    if (!noAutoStart) await ensureStatePoll();
     const enabled = (adapterId: string) => enabledFor?.(adapterId) ?? true;
     const [chatResult, readyResult] = await Promise.allSettled([
       herdrChats(paseo, deps.harnesses),
@@ -343,6 +398,18 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
       const live = new Map(agents.map((agent) => [agent.terminal_id, agent]));
       const reconciled = reconcileChats(chats, live, target, resolver, await paneProcesses(chats, live, target, resolver, (method, params) => request(socket, method, params)));
       const inputReady = await readInputReady(socket, agents, reconciled, target, enabled);
+      const facts = new Map(await Promise.all(agents.map(async (agent): Promise<[string, AgentFacts]> => [
+        agent.terminal_id,
+        await readFacts(agent, reconciled.get(chatKey(target.herdrSession, agent.terminal_id))?.owner.lastActivityAt ?? null),
+      ])));
+      // Pane numbers: Herdr's own when it sends one, else the 1-based position among the tab's panes in list order.
+      const paneNumber = new Map<string, number>();
+      const perTab = new Map<string, number>();
+      for (const pane of panes) {
+        const position = (perTab.get(pane.tab_id) ?? 0) + 1;
+        perTab.set(pane.tab_id, position);
+        paneNumber.set(pane.pane_id, pane.number ?? position);
+      }
       const tabNumber = new Map(tabs.map((tab) => [tab.tab_id, tab.number]));
       const out: OverviewWorkspace[] = [...workspaces].sort((a, b) => a.number - b.number).map((workspace) => {
         const firstPane = panes
@@ -362,6 +429,11 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
               const resolved = ownerAdapter(reconciled, agent, target, resolver);
               const adapter = resolved && enabled(resolved.id) ? resolved : undefined;
               const bound = reconciled.get(chatKey(target.herdrSession, agent.terminal_id));
+              const fact = facts.get(agent.terminal_id)!;
+              // A stamp counts only while it still matches the status and sequence Herdr reports now.
+              const stamp = stamper.get(chatKey(target.herdrSession, agent.terminal_id));
+              const stampCurrent = stamp !== null && stamp.status === agent.agent_status && stamp.seq === agent.state_change_seq;
+              const model = fact.summary.model;
               return {
                 terminalId: agent.terminal_id,
                 paneId: agent.pane_id,
@@ -379,6 +451,16 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
                 attach: herdrPath ? { command: herdrPath, args: attachArgs(target.herdrSession, agent.name ?? agent.pane_id) } : null,
                 inputReady: inputReady.get(agent.terminal_id) ?? null,
                 canRestart: Boolean(adapter?.launch && adapter.resumeArgs && agent.agent_session),
+                paneNumber: paneNumber.get(agent.pane_id) ?? null,
+                lastActivityAt: fact.lastActivity?.at ?? null,
+                lastActivitySource: fact.lastActivity?.source ?? null,
+                stateChangedAt: stampCurrent ? stamp.at : null,
+                stateChangedExact: stampCurrent ? stamp.exact : false,
+                stateChangeSeq: agent.state_change_seq,
+                sessionStartedAt: fact.summary.sessionStartedAt,
+                lastAssistantAt: fact.summary.lastAssistantAt,
+                model,
+                cache: cacheInfo(model, fact.summary),
               };
             }),
           }));
@@ -392,7 +474,7 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
           tabs: overviewTabs,
         };
       });
-      return { target, ompEnabled, connection: { status: "connected" as const, version: ready.version, autoStarted: ready.autoStarted }, companion, workspaces: out, chatError };
+      return { target, ompEnabled, connection: { status: "connected" as const, version: ready.version, autoStarted: ready.autoStarted }, companion, workspaces: out, chatError, serverNow: new Date(now()).toISOString(), ...(deps.statePollMs ? { statePollMs: deps.statePollMs } : {}) };
     } catch (error) {
       return unavailable(error);
     }
@@ -513,4 +595,10 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
     const created = WorkspaceCreatedResultSchema.parse(await request(target.socketPath, "workspace.create", { cwd: real, label: name, focus: false }));
     return { workspaceId: created.workspace.workspace_id, label: name, cwd: real };
   });
+
+  /** Stops the state-change loop (plugin shutdown). */
+  return () => {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = undefined;
+  };
 }

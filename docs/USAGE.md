@@ -20,7 +20,11 @@ The screen shows, top to bottom:
 
 ### Agent rows
 
-Each row shows the agent's name, its status, and a second line with the harness, Herdr pane and folder, for example `OMP · pane w2:p1 · /Users/me/project`. The name is the terminal title with the prompt glyph removed, else the Herdr agent name.
+Each row shows the agent's name, its status (a symbol and a word) and its harness. The raw pane id, for example `w2:p1`, is in the **⋯** sheet. The name is the terminal title with the prompt glyph removed, else the Herdr agent name.
+
+Each row also shows where the agent is (`W2 api-server › T3 tests › P1`; the workspace part is dropped inside a workspace card) and a line of times: last activity, how long it has been in its state, whether its prompt cache is estimated to be cold (Anthropic models only, always marked "est."), when the session started, and the model. A time the plugin can't know is left out. Time in state counts from when the plugin first saw the agent, so right after a daemon restart it reads `≥ 52m`. **⋯** shows the exact times and where each came from.
+
+The row above the cards sets the order: **Sort** picks the field (Herdr order by default, last activity, state changed, cache cold at, session started, status, title, harness, model, workspace, tab, pane, folder, has chat, input ready, duplicates), the arrow reverses it, and **Grouped / Flat** switches between one card per workspace and one list. Picking a field resets the direction to its natural one (newest first for times). Agents with no value for the field go last. The choice is saved per host.
 
 Status is Herdr's own: **Idle**, **Working**, **Blocked** (waiting for a decision), **Done** or **Unknown**.
 

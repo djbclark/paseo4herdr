@@ -40,3 +40,18 @@ export function shellGateEpoch(values: { allowShell: boolean; allowShellEpoch: n
 
 /** The shell gate as last read: an open epoch, `null` (read, and closed), or `"unknown"` (not read yet, or the read failed). */
 export type ShellGate = number | null | "unknown";
+
+/**
+ * How the Herdr screen orders its agents. Host-scoped (the SDK has no per-device store), so every device that opens this
+ * host shares one choice. `field` is validated by the client against its sort list, so an unknown value falls back to Herdr order.
+ */
+export const herdrViewSettings = defineSettings({
+  id: "herdr-overview-view",
+  scope: "host",
+  version: 1,
+  schema: z.object({
+    field: z.string().default("herdr"),
+    dir: z.enum(["asc", "desc"]).nullable().default(null),
+    grouped: z.boolean().default(true),
+  }),
+});

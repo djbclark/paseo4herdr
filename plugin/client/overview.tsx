@@ -1,6 +1,6 @@
-import { useCallback, useMemo, useState } from "react";
-import { Pressable, Text, TextInput, View } from "react-native";
-import { usePaseo, useRpc, type PluginScreenProps } from "@getpaseo/plugin/client";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AppState, Pressable, Text, TextInput, View } from "react-native";
+import { usePaseo, useRpc, useSettings, type PluginScreenProps } from "@getpaseo/plugin/client";
 import { Modal, ScrollView, copyText, useToast } from "@getpaseo/plugin/client/react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -11,7 +11,6 @@ import {
   herdrOverviewRpc,
   herdrWorkspaceCreateRpc,
   type OverviewAgent,
-  type OverviewWorkspace,
 } from "../shared/rpc.js";
 import {
   agentLabel,
@@ -25,11 +24,29 @@ import {
   freshDuplicatesToArchive,
   OVERVIEW_QUERY_KEY,
   OVERVIEW_REFETCH_MS,
+  statusGlyph,
   statusLabel,
   statusTone,
   validateFolder,
 } from "./helpers.js";
 import { agentPlace } from "../shared/labels.js";
+import { herdrViewSettings } from "../shared/settings.js";
+import {
+  DEFAULT_VIEW,
+  SORT_FIELD_IDS,
+  SORT_FIELDS,
+  dirLabel,
+  flatAgents,
+  groupAgents,
+  normalizeView,
+  pickField,
+  toggleDir,
+  type AgentGroup,
+  type FlatAgent,
+  type SortView,
+} from "./sort.js";
+import { clockSkewMs, classifyCache, tickIntervalMs } from "./time.js";
+import { detailLines, rowTexts } from "./row.js";
 import { bindHerdrChat, createHerdrChat } from "./actions.js";
 import { FolderField } from "./folder-field.js";
 
@@ -105,6 +122,23 @@ function useStyles(theme: Theme, compact: boolean) {
       agent: { gap: 6, paddingVertical: 6, borderTopColor: c.border, borderTopWidth: 1 },
       agentLine: { flexDirection: "row" as const, alignItems: "center" as const, gap: 8 },
       agentMain: { flex: 1, gap: 2 },
+      chip: {
+        backgroundColor: c.surface2,
+        borderColor: c.border,
+        borderWidth: 1,
+        borderRadius: 14,
+        paddingHorizontal: 12,
+        paddingVertical: 6,
+      },
+      chipOn: {
+        backgroundColor: c.surface2,
+        borderColor: c.accent,
+        borderWidth: 1,
+        borderRadius: 14,
+        paddingHorizontal: 12,
+        paddingVertical: 6,
+      },
+      detail: { flexDirection: "row" as const, gap: 8, flexWrap: "wrap" as const },
     };
   }, [theme, compact]);
 }
@@ -131,20 +165,18 @@ function Button({
   );
 }
 
-function StatusBadge({ status, theme, styles }: { status: OverviewAgent["status"]; theme: Theme; styles: Styles }) {
+/** Glyph and word as well as colour. The word drops on a phone, where line 2 starts with it. */
+function StatusBadge({ status, compact, theme }: { status: OverviewAgent["status"]; compact: boolean; theme: Theme }) {
   const c = theme.colors;
   const tone = statusTone(status);
   const color =
     tone === "success" ? c.statusSuccess : tone === "warning" ? c.statusWarning : tone === "accent" ? c.accent : c.foregroundMuted;
-  const dot = useMemo(
-    () => ({ width: 8, height: 8, borderRadius: 4, backgroundColor: color }),
-    [color],
-  );
+  const text = useMemo(() => ({ color, fontWeight: "600" as const }), [color]);
   return (
-    <View style={styles.row}>
-      <View style={dot} />
-      <Text style={styles.muted}>{statusLabel(status)}</Text>
-    </View>
+    <Text style={text} accessibilityElementsHidden importantForAccessibility="no">
+      {statusGlyph(status)}
+      {compact ? "" : ` ${statusLabel(status)}`}
+    </Text>
   );
 }
 
@@ -185,9 +217,12 @@ function RestartSheet({ agent, label, open, onOpenChange, onRestarted, styles }:
 }
 
 /** Less common actions for one agent. */
-function MoreSheet({ agent, label, open, onOpenChange, onRestart, navigation, styles }: {
-  agent: OverviewAgent; label: string; open: boolean; onOpenChange(open: boolean): void; onRestart(): void; navigation: Navigation; styles: Styles;
+function MoreSheet({ item, label, open, onOpenChange, onRestart, navigation, styles }: {
+  item: FlatAgent; label: string; open: boolean; onOpenChange(open: boolean): void; onRestart(): void; navigation: Navigation; styles: Styles;
 }) {
+  const { agent } = item;
+  // Built when the sheet opens, from the clock then: the facts and their absolute times don't tick.
+  const details = useMemo(() => (open ? detailLines(item, Date.now()) : []), [open, item]);
   const toast = useToast();
   const paseo = usePaseo();
   const { attach, cwd } = agent;
@@ -220,6 +255,17 @@ function MoreSheet({ agent, label, open, onOpenChange, onRestart, navigation, st
     <Modal title={label} open={open} onOpenChange={onOpenChange}>
       <Modal.Content>
         <Text style={styles.muted}>{[agentPlace(agent.harness ?? agent.kind, agent.paneId), cwd].filter(Boolean).join(" · ")}</Text>
+        {details.length > 0 ? (
+          <View style={styles.indent}>
+            <Text style={styles.title}>Details</Text>
+            {details.map((line) => (
+              <View key={line.label} style={styles.detail}>
+                <Text style={styles.muted}>{line.label}</Text>
+                <Text selectable style={styles.text}>{line.value}</Text>
+              </View>
+            ))}
+          </View>
+        ) : null}
         {attach && cwd && navigation ? (
           <Button label={terminal.isPending ? "Opening…" : "Open in terminal"} secondary disabled={terminal.isPending} onPress={() => terminal.mutate()} styles={styles} />
         ) : null}
@@ -235,10 +281,15 @@ function MoreSheet({ agent, label, open, onOpenChange, onRestart, navigation, st
   );
 }
 
-/** One live Herdr agent. Tapping it opens its Paseo chat. */
-function AgentRow({ agent, theme, styles, navigation, onChanged }: {
-  agent: OverviewAgent; theme: Theme; styles: Styles; navigation: Navigation; onChanged(): void;
+/**
+ * One live Herdr agent. Tapping it opens its Paseo chat. Memoised: the screen's clock tick re-renders every row, and
+ * a row repaints only when the text it shows changed (`place`, `times`, `alert`, `speech` are plain values).
+ */
+const AgentRow = memo(function AgentRow({ item, place: placeLine, times, alert, speech, compact, theme, styles, navigation, onChanged }: {
+  item: FlatAgent; place: string; times: string; alert: boolean; speech: string; compact: boolean;
+  theme: Theme; styles: Styles; navigation: Navigation; onChanged(): void;
 }) {
+  const { agent } = item;
   const toast = useToast();
   const paseo = usePaseo();
   const [more, setMore] = useState(false);
@@ -316,16 +367,18 @@ function AgentRow({ agent, theme, styles, navigation, onChanged }: {
       <View style={styles.agentLine}>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={`Open chat ${label}`}
+          accessibilityLabel={`Open chat: ${speech}`}
           disabled={!canOpen || busy}
           onPress={open}
           style={styles.agentMain}
         >
           <View style={styles.row}>
+            <StatusBadge status={agent.status} compact={compact} theme={theme} />
             <Text style={styles.text} numberOfLines={1}>{label}</Text>
-            <StatusBadge status={agent.status} theme={theme} styles={styles} />
+            {agent.harness && !compact ? <Text style={styles.muted}>{agent.harness}</Text> : null}
           </View>
-          <Text style={styles.muted} numberOfLines={1}>{[place, cwd].filter(Boolean).join(" · ")}</Text>
+          <Text style={styles.muted} numberOfLines={1} ellipsizeMode="middle">{placeLine}</Text>
+          {times ? <Text style={alert ? styles.warning : styles.muted}>{times}</Text> : null}
           {!agent.provider ? <Text style={styles.muted}>No Paseo provider handles this agent kind.</Text> : null}
           {agent.provider && !paseoAgentId ? (
             <Text style={styles.muted}>{link.isPending ? "Opening a chat…" : "No chat yet: tap to open one."}</Text>
@@ -353,11 +406,11 @@ function AgentRow({ agent, theme, styles, navigation, onChanged }: {
         </View>
       ) : null}
       {folder.error ? <Text accessibilityRole="alert" style={styles.danger}>{errorMessage(folder.error)}</Text> : null}
-      <MoreSheet agent={agent} label={label} open={more} onOpenChange={setMore} onRestart={() => setRestarting(true)} navigation={navigation} styles={styles} />
+      <MoreSheet item={item} label={label} open={more} onOpenChange={setMore} onRestart={() => setRestarting(true)} navigation={navigation} styles={styles} />
       <RestartSheet agent={agent} label={label} open={restarting} onOpenChange={setRestarting} onRestarted={restarted} styles={styles} />
     </View>
   );
-}
+});
 
 function NewAgentButton({
   cwd,
@@ -414,33 +467,143 @@ function NewChatForm({ styles, theme, navigation, onCreated }: { styles: Styles;
   );
 }
 
+/** One card: a workspace (grouped) or every agent (flat, `group.workspace` null). */
 function WorkspaceCard({
-  workspace,
+  group,
+  grouped,
+  compact,
+  nowMs,
   ompEnabled,
   theme,
   styles,
   navigation,
   onChanged,
 }: {
-  workspace: OverviewWorkspace;
+  group: { workspace: AgentGroup["workspace"] | null; agents: FlatAgent[] };
+  grouped: boolean;
+  compact: boolean;
+  nowMs: number;
   ompEnabled: boolean;
   theme: Theme;
   styles: Styles;
   navigation: Navigation;
   onChanged(): void;
 }) {
-  const agents = workspace.tabs.flatMap((tab) => tab.agents);
+  const { workspace, agents } = group;
   return (
     <View style={styles.card}>
-      <Text style={styles.title} numberOfLines={1}>{workspace.label}</Text>
-      {workspace.cwd ? <Text selectable style={styles.muted} numberOfLines={1}>{workspace.cwd}</Text> : null}
+      <Text style={styles.title} numberOfLines={1}>{workspace ? `W${workspace.number} ${workspace.label}` : "All agents"}</Text>
+      {workspace?.cwd ? <Text selectable style={styles.muted} numberOfLines={1}>{workspace.cwd}</Text> : null}
       {agents.length === 0 ? <Text style={styles.muted}>No agents running.</Text> : null}
-      {agents.map((agent) => (
-        <AgentRow key={agent.terminalId} agent={agent} theme={theme} styles={styles} navigation={navigation} onChanged={onChanged} />
-      ))}
-      {ompEnabled && workspace.cwd ? (
+      {agents.map((item) => {
+        const texts = rowTexts(item, agentLabel(item.agent), nowMs, { compact, grouped });
+        return (
+          <AgentRow
+            key={item.agent.terminalId}
+            item={item}
+            place={texts.place}
+            times={texts.times}
+            alert={texts.alert}
+            speech={texts.speech}
+            compact={compact}
+            theme={theme}
+            styles={styles}
+            navigation={navigation}
+            onChanged={onChanged}
+          />
+        );
+      })}
+      {ompEnabled && workspace?.cwd ? (
         <NewAgentButton cwd={workspace.cwd} styles={styles} navigation={navigation} onCreated={onChanged} />
       ) : null}
+    </View>
+  );
+}
+
+/**
+ * The sort choice, kept in the plugin's host-scoped view setting when it can be read and written, else in memory for this
+ * session. (The SDK has no per-device store, so every device on this host shares one choice.)
+ */
+function useView(): [SortView, (next: SortView) => void] {
+  const settings = useSettings(herdrViewSettings);
+  const [local, setLocal] = useState<SortView | null>(null);
+  const { status, save } = settings;
+  const revision = status === "ready" ? settings.revision : null;
+  const stored = status === "ready" ? normalizeView(settings.values) : DEFAULT_VIEW;
+  const update = useCallback((next: SortView) => {
+    setLocal(next);
+    if (revision !== null) void save({ field: next.field, dir: next.dir, grouped: next.grouped }, revision);
+  }, [save, revision]);
+  return [local ?? stored, update];
+}
+
+/**
+ * The screen's one clock. It re-arms itself after each tick with `nextDelay()` (1 s while a countdown is under two minutes,
+ * else 15 s) and stops while the app is in the background.
+ */
+function useTick(nextDelay: () => number): number {
+  const [tick, setTick] = useState(0);
+  const delay = useRef(nextDelay);
+  delay.current = nextDelay;
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const arm = () => {
+      timer = setTimeout(() => { setTick((n) => n + 1); arm(); }, delay.current());
+    };
+    const stop = () => { if (timer) clearTimeout(timer); timer = undefined; };
+    if (AppState.currentState === "active" || AppState.currentState === undefined) arm();
+    const subscription = AppState.addEventListener("change", (next) => {
+      stop();
+      if (next === "active") { setTick((n) => n + 1); arm(); }
+    });
+    return () => { stop(); subscription.remove(); };
+  }, []);
+  return tick;
+}
+
+function SortPicker({ view, open, onOpenChange, onChange, styles }: {
+  view: SortView; open: boolean; onOpenChange(open: boolean): void; onChange(next: SortView): void; styles: Styles;
+}) {
+  return (
+    <Modal title="Sort by" open={open} onOpenChange={onOpenChange}>
+      <Modal.Content>
+        {SORT_FIELD_IDS.map((field) => (
+          <Pressable
+            key={field}
+            accessibilityRole="button"
+            accessibilityState={{ selected: field === view.field }}
+            onPress={() => { onChange(pickField(view, field)); onOpenChange(false); }}
+            style={styles.option}
+          >
+            <Text style={styles.text}>{field === view.field ? "✓ " : "   "}{SORT_FIELDS[field].label}</Text>
+          </Pressable>
+        ))}
+      </Modal.Content>
+    </Modal>
+  );
+}
+
+function SortBar({ view, onChange, compact, styles }: { view: SortView; onChange(next: SortView): void; compact: boolean; styles: Styles }) {
+  const [picking, setPicking] = useState(false);
+  const arrow = view.dir === "asc" ? "↑" : "↓";
+  const label = dirLabel(view.field, view.dir);
+  return (
+    <View style={styles.row}>
+      <Pressable accessibilityRole="button" accessibilityLabel={`Sort by ${SORT_FIELDS[view.field].label}`} onPress={() => setPicking(true)} style={styles.chip}>
+        <Text style={styles.text}>Sort: {SORT_FIELDS[view.field].label} ▾</Text>
+      </Pressable>
+      <Pressable accessibilityRole="button" accessibilityLabel={`Direction: ${label}. Tap to reverse`} onPress={() => onChange(toggleDir(view))} style={styles.chip}>
+        <Text style={styles.text}>{compact ? arrow : `${arrow} ${label}`}</Text>
+      </Pressable>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={view.grouped ? "Grouped by workspace. Tap for one flat list" : "Flat list. Tap to group by workspace"}
+        onPress={() => onChange({ ...view, grouped: !view.grouped })}
+        style={view.grouped ? styles.chipOn : styles.chip}
+      >
+        <Text style={styles.text}>{view.grouped ? "Grouped" : "Flat"}</Text>
+      </Pressable>
+      <SortPicker view={view} open={picking} onOpenChange={setPicking} onChange={onChange} styles={styles} />
     </View>
   );
 }
@@ -512,6 +675,19 @@ export function HerdrOverviewScreen({ theme, layout, navigation }: PluginScreenP
     void queryClient.invalidateQueries({ queryKey: OVERVIEW_QUERY_KEY });
   }, [queryClient]);
   const data = query.data;
+  const [view, setView] = useView();
+  // Re-sorted only when new data arrives or the choice changes, never on a clock tick, so rows don't jump.
+  const workspaces = data?.workspaces;
+  const groups = useMemo(() => {
+    if (!workspaces) return [];
+    return view.grouped ? groupAgents(workspaces, view) : [{ workspace: null, agents: flatAgents(workspaces, view) }];
+  }, [workspaces, view]);
+  const skew = useMemo(() => clockSkewMs(data?.serverNow, query.dataUpdatedAt), [data?.serverNow, query.dataUpdatedAt]);
+  const lastStates = useRef<ReturnType<typeof classifyCache>[]>([]);
+  const tick = useTick(() => tickIntervalMs(lastStates.current));
+  // The device clock corrected by the daemon's, read once per render and handed to every row.
+  const nowMs = useMemo(() => Date.now() + skew, [skew, tick, data]);
+  lastStates.current = groups.flatMap((group) => group.agents.map((item) => classifyCache(item.agent.cache, item.agent.status, nowMs)));
   const companionNotice = data ? companionBanner(data.companion, data.ompEnabled) : null;
 
   return (
@@ -520,6 +696,7 @@ export function HerdrOverviewScreen({ theme, layout, navigation }: PluginScreenP
         <Text style={styles.title}>Herdr</Text>
         <Button label={query.isFetching ? "Refreshing…" : "Refresh"} secondary onPress={refresh} styles={styles} />
       </View>
+      {data && data.connection.status === "connected" ? <SortBar view={view} onChange={setView} compact={layout.compact} styles={styles} /> : null}
       {query.error ? (
         <Text accessibilityRole="alert" style={styles.danger}>
           {errorMessage(query.error)}
@@ -540,10 +717,13 @@ export function HerdrOverviewScreen({ theme, layout, navigation }: PluginScreenP
           {data.connection.status === "connected" && data.workspaces.length === 0 ? (
             <Text style={styles.muted}>No Herdr workspaces yet. Start a chat in a folder below.</Text>
           ) : null}
-          {data.workspaces.map((workspace) => (
+          {groups.map((group) => (
             <WorkspaceCard
-              key={workspace.workspaceId}
-              workspace={workspace}
+              key={group.workspace?.id ?? "all"}
+              group={group}
+              grouped={view.grouped}
+              compact={layout.compact}
+              nowMs={nowMs}
               ompEnabled={data.ompEnabled}
               theme={theme}
               styles={styles}

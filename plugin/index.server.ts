@@ -8,11 +8,15 @@ import { companionInstallStatus } from "./server/harness/omp/companion-install.j
 import { BoundSessions, OpenSessions } from "./server/bound-sessions.js";
 import { TargetReadiness, defaultTargetReadinessDeps, resolveTarget } from "./server/herdr/target.js";
 import { PaseoHost } from "./server/host.js";
-import { herdrSettings } from "./shared/settings.js";
+import { herdrSettings, herdrViewSettings } from "./shared/settings.js";
 import { createShellEpochCache } from "./server/shell-epoch-cache.js";
+
+/** How often the plugin samples Herdr to stamp agent state changes. */
+const STATE_POLL_MS = 5000;
 
 export default function contribute(server: PluginServerContext) {
   const settings = server.registerSettings(herdrSettings);
+  server.registerSettings(herdrViewSettings);
   const env = process.env;
   // Adapter routing (F3): one resolver over every registered adapter, shared by providers and RPCs.
   const resolver = createResolver(harnesses);
@@ -61,6 +65,6 @@ export default function contribute(server: PluginServerContext) {
       getPaseo: () => host.get(),
     }));
   }
-  registerManagementRpcs(server, { readTarget, shellEpoch: shellGate.read, ensureReady: (target) => readiness.ensureReady(target), harnesses, boundSessions, openSessions, resolver, companionStatus: () => companionInstallStatus() });
-  return () => { shellGate.stop(); };
+  const stopRpcs = registerManagementRpcs(server, { statePollMs: STATE_POLL_MS, readTarget, shellEpoch: shellGate.read, ensureReady: (target) => readiness.ensureReady(target), harnesses, boundSessions, openSessions, resolver, companionStatus: () => companionInstallStatus() });
+  return () => { shellGate.stop(); stopRpcs(); };
 }

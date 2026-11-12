@@ -62,6 +62,8 @@ export const PaneInfoSchema = z.object({
   workspace_id: z.string(),
   tab_id: z.string(),
   focused: z.boolean(),
+  /** 1-based pane number within its tab, when this Herdr sends one. */
+  number: z.number().int().nullish(),
   cwd: z.string().nullish(),
   foreground_cwd: z.string().nullish(),
   restore_error: z.string().nullish(),
