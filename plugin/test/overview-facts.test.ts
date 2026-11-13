@@ -167,4 +167,14 @@ describe("overview facts", () => {
     const { overview } = setup();
     expect(agents(await overview())[0]).toMatchObject({ model: null });
   });
+
+  it("a session read that hangs does not stall the overview", async () => {
+    seed([pane("p1")], [agent("p1", sessionOf(join(dir, "hung.jsonl")))]);
+    const hung = { read: () => new Promise(() => undefined), reads: 0 } as unknown as TranscriptSummaryCache;
+    const { overview } = setup({ transcripts: hung });
+    const started = Date.now();
+    const [row] = agents(await overview());
+    expect(row).toMatchObject({ model: null, lastActivityAt: null, status: "idle" });
+    expect(Date.now() - started).toBeLessThan(4000);
+  });
 });

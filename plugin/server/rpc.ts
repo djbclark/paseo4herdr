@@ -79,6 +79,19 @@ export async function findOnPath(name: string, env: Readonly<Record<string, stri
   return null;
 }
 
+/** Longest the overview waits for one agent's session-file facts; past it the row simply has none (the read carries on in the background). */
+export const FACTS_DEADLINE_MS = 1500;
+
+/** `promise`'s value, or null when it hasn't settled within `ms`: a hung mount can't stall the overview. */
+export async function withDeadline<T>(promise: Promise<T | null>, ms: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([promise, new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), ms); })]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 export async function checkDirectory(path: string): Promise<string> {
@@ -309,7 +322,7 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
   const readFacts = async (agent: AgentInfo, chatAt: string | null, roots: readonly string[]): Promise<AgentFacts> => {
     const session = agent.agent_session;
     // The path was reported by whatever runs in the pane: only the owning harness's own session directory is read.
-    const read = session?.kind === "path" && roots.length > 0 ? await transcripts.read(session.value, roots).catch(() => null) : null;
+    const read = session?.kind === "path" && roots.length > 0 ? await withDeadline(transcripts.read(session.value, roots).catch(() => null), FACTS_DEADLINE_MS) : null;
     const summary = read?.summary ?? EMPTY_SUMMARY;
     const transcriptAt = laterIso(summary.lastAssistantAt, summary.lastUserAt);
     return { summary, lastActivity: pickLastActivity({ transcriptAt, fileMtime: read?.mtime ?? null, chatAt }) };

@@ -1,10 +1,11 @@
 import { execFile } from "node:child_process";
-import { appendFile, mkdir, mkdtemp, rm, symlink, truncate, writeFile } from "node:fs/promises";
+import { appendFile, link, mkdir, mkdtemp, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { FULL_READ_LIMIT, MAX_READ_BYTES, TranscriptSummaryCache, cleanIso, cleanModel, confinedSessionPath, foldTranscriptLines, EMPTY_SUMMARY } from "../server/activity.js";
+import { withDeadline } from "../server/rpc.js";
+import { FULL_READ_LIMIT, MAX_READ_BYTES, TranscriptSummaryCache, cleanIso, cleanModel, confinedSessionPath, lexicallyInside, foldTranscriptLines, EMPTY_SUMMARY } from "../server/activity.js";
 
 const run = promisify(execFile);
 const line = (o: object) => JSON.stringify(o);
@@ -162,5 +163,72 @@ describe("untrusted transcript values", () => {
       line({ type: "message", timestamp: `2026-01-01 (${"x".repeat(9999)})`, message: { role: "assistant", provider: "anthropic", model: "<b>" } }),
     ]);
     expect(summary).toEqual(EMPTY_SUMMARY);
+  });
+});
+
+describe("hardlinks", () => {
+  it("a second name inside the root for a file outside it is refused", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "outside-"));
+    try {
+      await writeFile(join(outside, "secret.jsonl"), session("2026-11-12T10:00:00.000Z") + "\n");
+      await link(join(outside, "secret.jsonl"), join(dir, "h.jsonl"));
+      const cache = new TranscriptSummaryCache();
+      expect(await cache.read(join(dir, "h.jsonl"), roots)).toBeNull();
+      expect(cache.reads).toBe(0);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("invalid UTF-8", () => {
+  it("keeps the read position in bytes, so later lines are still seen", async () => {
+    const path = join(dir, "s.jsonl");
+    await writeFile(path, Buffer.concat([Buffer.from(session("2026-11-12T10:00:00.000Z") + "\n"), Buffer.alloc(1000, 0x80), Buffer.from("\n")]));
+    const cache = new TranscriptSummaryCache();
+    await cache.read(path, roots);
+    await appendFile(path, msg("2026-11-12T11:00:00.000Z", "assistant") + "\n");
+    expect((await cache.read(path, roots))?.summary.lastAssistantAt).toBe("2026-11-12T11:00:00.000Z");
+  });
+  it("and in the tail window of a large file", async () => {
+    const path = join(dir, "big.jsonl");
+    const filler = Buffer.from(line({ type: "custom_message", content: "x".repeat(1000) }) + "\n");
+    const parts = [Buffer.from(session("2026-11-12T10:00:00.000Z") + "\n")];
+    for (let i = 0; i < 4500; i++) parts.push(filler);
+    parts.push(Buffer.alloc(5000, 0x80), Buffer.from("\n"));
+    await writeFile(path, Buffer.concat(parts));
+    const cache = new TranscriptSummaryCache();
+    await cache.read(path, roots);
+    await appendFile(path, msg("2026-11-12T11:00:00.000Z", "assistant") + "\n");
+    expect((await cache.read(path, roots))?.summary.lastAssistantAt).toBe("2026-11-12T11:00:00.000Z");
+  });
+});
+
+describe("no I/O on a path that fails the cheap checks", () => {
+  it("lexicallyInside decides from the string alone", () => {
+    expect(lexicallyInside(join(dir, "a.jsonl"), roots)).toBe(join(dir, "a.jsonl"));
+    expect(lexicallyInside(join(dir, "sub", "..", "a.jsonl"), roots)).toBe(join(dir, "a.jsonl"));
+    expect(lexicallyInside(join(dir, "..", "a.jsonl"), roots)).toBeNull();
+    expect(lexicallyInside("/Volumes/hung-share/a.jsonl", roots)).toBeNull();
+    expect(lexicallyInside(`${dir}-evil/a.jsonl`, roots)).toBeNull();
+    expect(lexicallyInside(join(dir, "a.txt"), roots)).toBeNull();
+    expect(lexicallyInside("a.jsonl", roots)).toBeNull();
+    expect(lexicallyInside(join(dir, `${"x".repeat(5000)}.jsonl`), roots)).toBeNull();
+    expect(lexicallyInside(undefined, roots)).toBeNull();
+  });
+  it("an outside path costs no read and no queue slot", async () => {
+    const cache = new TranscriptSummaryCache();
+    const results = await Promise.all(Array.from({ length: 50 }, (_, i) => cache.read(`/Volumes/hung-share/${i}.jsonl`, roots)));
+    expect(results.every((r) => r === null)).toBe(true);
+    expect(cache.reads).toBe(0);
+  });
+});
+
+describe("withDeadline", () => {
+  it("returns the value when it arrives in time and null when it never does", async () => {
+    expect(await withDeadline(Promise.resolve("ok" as string | null), 50)).toBe("ok");
+    const started = Date.now();
+    expect(await withDeadline(new Promise<string | null>(() => undefined), 40)).toBeNull();
+    expect(Date.now() - started).toBeLessThan(1000);
   });
 });

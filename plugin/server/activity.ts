@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
-import { open, realpath, type FileHandle } from "node:fs/promises";
-import { isAbsolute, sep } from "node:path";
+import { lstat, open, readlink, realpath, type FileHandle } from "node:fs/promises";
+import { isAbsolute, resolve, sep } from "node:path";
 import type { AgentStatus } from "./herdr/schema.js";
 
 /**
@@ -119,32 +119,57 @@ const TAIL_BYTES = 1024 * 1024;
 export const MAX_READ_BYTES = FULL_READ_LIMIT;
 /** After a failed read, leave the file alone this long (an unchanged file stays left alone until it changes). */
 const FAIL_BACKOFF_MS = 30_000;
-const MAX_CONCURRENT_READS = 4;
+const MAX_CONCURRENT_READS = 2;
 
 /** Reads `[start, end)` through an already-open handle: the caller fstat'ed that handle, so there is no second open by name. */
-async function readRange(handle: FileHandle, start: number, end: number): Promise<string> {
+async function readRange(handle: FileHandle, start: number, end: number): Promise<Buffer> {
   const length = Math.max(0, Math.min(end - start, MAX_READ_BYTES));
   const buffer = Buffer.alloc(length);
   const { bytesRead } = await handle.read(buffer, 0, length, start);
-  return buffer.subarray(0, bytesRead).toString("utf8");
+  return buffer.subarray(0, bytesRead);
 }
 
-/** The complete lines of `text` and how many UTF-8 bytes they (with their newlines) cover; a trailing partial line is left out. */
-function completeLines(text: string): { lines: string[]; bytes: number } {
-  const cut = text.lastIndexOf("\n");
+/**
+ * The complete lines of `data` and how many bytes they (with their newlines) cover; a trailing partial line is left out.
+ * Positions are counted in the bytes that were read, never in the decoded text: invalid UTF-8 decodes to U+FFFD, which
+ * re-encodes longer, so measuring the string would move the stored read position.
+ */
+function completeLines(data: Buffer): { lines: string[]; bytes: number } {
+  const cut = data.lastIndexOf(0x0a);
   if (cut < 0) return { lines: [], bytes: 0 };
-  const whole = text.slice(0, cut);
-  return { lines: whole.split("\n"), bytes: Buffer.byteLength(whole, "utf8") + 1 };
+  return { lines: data.subarray(0, cut).toString("utf8").split("\n"), bytes: cut + 1 };
+}
+
+/**
+ * Cheap, no-I/O test of a pane-reported path: absolute, short, `.jsonl`, and lexically inside one of `roots` once `..` is
+ * folded away. Returns the normalised path, or null. Runs before any filesystem call, so a path that points at a slow or
+ * hung mount is never touched.
+ */
+export function lexicallyInside(path: unknown, roots: readonly string[]): string | null {
+  if (typeof path !== "string" || path.length > 4096 || !isAbsolute(path) || !path.endsWith(".jsonl") || path.includes("\0")) return null;
+  const normal = resolve(path);
+  for (const root of roots) {
+    const base = resolve(root);
+    if (normal.startsWith(base.endsWith(sep) ? base : base + sep)) return normal;
+  }
+  return null;
 }
 
 /**
  * The real path of `path` when it is a `.jsonl` file inside one of `roots` (also resolved), else null. A symlink anywhere in
  * the path is resolved first, so one that points out of a root is refused.
+ *
+ * Residual: between this check and the later `open`, a process that can write inside the session directory could swap a
+ * parent directory for a symlink. {@link TranscriptSummaryCache} narrows that to a double race (it compares the opened
+ * handle with an `lstat` of the checked path, and on Linux with `/proc/self/fd`) but cannot close it on macOS, which has no
+ * path-of-descriptor check we can use. What a winner gets is a regular file's existence, mtime, and any value of the strict
+ * timestamp/model shape; the attacker already runs as the same user.
  */
 export async function confinedSessionPath(path: string, roots: readonly string[]): Promise<string | null> {
-  if (typeof path !== "string" || path.length > 4096 || !isAbsolute(path) || !path.endsWith(".jsonl") || path.includes("\0")) return null;
+  const normal = lexicallyInside(path, roots);
+  if (!normal) return null;
   try {
-    const real = await realpath(path);
+    const real = await realpath(normal);
     for (const root of roots) {
       const realRoot = await realpath(root).catch(() => null);
       if (realRoot && real.startsWith(realRoot.endsWith(sep) ? realRoot : realRoot + sep)) return real;
@@ -175,7 +200,7 @@ class Limiter {
  * The path comes from a pane (untrusted), so it is confined to the harness's session directory, opened once without
  * following symlinks, and checked on that handle to be a regular file. A file that only grew is read from where the last
  * read stopped, never more than {@link MAX_READ_BYTES} at a time (a bigger jump folds the tail window only). Concurrent
- * callers share one read per file, at most four files are read at once, and a failed read is not retried until the file
+ * callers share one read per file, at most two files are read at once, and a failed read is not retried until the file
  * changes or a backoff passes.
  */
 export class TranscriptSummaryCache {
@@ -191,18 +216,25 @@ export class TranscriptSummaryCache {
 
   /** `roots`: the directories a session file may live in. A path outside them (or not a regular file) has no facts. */
   async read(path: string, roots: readonly string[]): Promise<TranscriptRead | null> {
-    const real = await confinedSessionPath(path, roots);
-    if (!real) return null;
-    const running = this.inflight.get(real);
+    // Lexical check first, with no I/O. Everything that touches the filesystem (realpath included) runs inside the
+    // limiter and is shared per input path, so a hung mount can pin at most the limiter's slots, never the thread pool.
+    const normal = lexicallyInside(path, roots);
+    if (!normal) return null;
+    const running = this.inflight.get(normal);
     if (running) return running;
-    const task = this.limiter.run(() => this.readOnce(real)).finally(() => this.inflight.delete(real));
-    this.inflight.set(real, task);
+    const task = this.limiter.run(async () => {
+      const real = await confinedSessionPath(normal, roots);
+      return real ? this.readOnce(real) : null;
+    }).finally(() => this.inflight.delete(normal));
+    this.inflight.set(normal, task);
     return task;
   }
 
   private async readOnce(path: string): Promise<TranscriptRead | null> {
     let handle: FileHandle;
+    let checked;
     try {
+      checked = await lstat(path);
       handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     } catch {
       this.entries.delete(path);
@@ -210,7 +242,10 @@ export class TranscriptSummaryCache {
     }
     try {
       const info = await handle.stat();
-      if (!info.isFile()) return null;
+      // The handle must be the very file that was checked (a parent swapped after the check opens another inode), a regular
+      // file, and not a second name for a file elsewhere (a hardlink out of the session directory).
+      if (!info.isFile() || info.nlink !== 1 || info.dev !== checked.dev || info.ino !== checked.ino) return null;
+      if (process.platform === "linux" && (await readlink(`/proc/self/fd/${handle.fd}`).catch(() => null)) !== path) return null;
       const cached = this.entries.get(path);
       const fresh = (): TranscriptRead | null => cached ? { summary: cached.summary, mtime: new Date(info.mtimeMs).toISOString() } : null;
       if (cached && cached.size === info.size && cached.mtimeMs === info.mtimeMs) return fresh();
@@ -238,7 +273,7 @@ export class TranscriptSummaryCache {
     }
   }
 
-  private async window(handle: FileHandle, start: number, end: number): Promise<string> {
+  private async window(handle: FileHandle, start: number, end: number): Promise<Buffer> {
     this.reads++;
     this.bytesRequested += Math.min(end - start, MAX_READ_BYTES);
     return readRange(handle, start, end);
@@ -256,12 +291,12 @@ export class TranscriptSummaryCache {
 
   /** The newest {@link TAIL_BYTES} of the file, from its first whole line; offset = just past the last whole line (the end when there is none). */
   private async tailWindow(handle: FileHandle, size: number): Promise<{ lines: string[]; offset: number }> {
-    const text = await this.window(handle, size - TAIL_BYTES, size);
-    const firstNewline = text.indexOf("\n");
+    const data = await this.window(handle, size - TAIL_BYTES, size);
+    const firstNewline = data.indexOf(0x0a);
     if (firstNewline < 0) return { lines: [], offset: size };
-    const afterFirst = text.slice(firstNewline + 1);
+    const afterFirst = data.subarray(firstNewline + 1);
     const tail = completeLines(afterFirst);
-    return { lines: tail.lines, offset: size - (Buffer.byteLength(afterFirst, "utf8") - tail.bytes) };
+    return { lines: tail.lines, offset: size - (afterFirst.length - tail.bytes) };
   }
 
   private async initial(handle: FileHandle, size: number): Promise<CacheEntry> {
