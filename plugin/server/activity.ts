@@ -100,6 +100,8 @@ export function foldTranscriptLines(previous: TranscriptSummary, lines: Iterable
 interface CacheEntry {
   size: number;
   mtimeMs: number;
+  /** The inode the summary was read from: a replaced file starts over. */
+  ino: number;
   /** Bytes already folded in: everything up to and including the last newline read. */
   offset: number;
   summary: TranscriptSummary;
@@ -248,15 +250,19 @@ export class TranscriptSummaryCache {
       if (process.platform === "linux" && (await readlink(`/proc/self/fd/${handle.fd}`).catch(() => null)) !== path) return null;
       const cached = this.entries.get(path);
       const fresh = (): TranscriptRead | null => cached ? { summary: cached.summary, mtime: new Date(info.mtimeMs).toISOString() } : null;
-      if (cached && cached.size === info.size && cached.mtimeMs === info.mtimeMs) return fresh();
+      if (cached && cached.ino === info.ino && cached.size === info.size && cached.mtimeMs === info.mtimeMs) return fresh();
       const failure = this.failed.get(path);
       if (failure && ((failure.size === info.size && failure.mtimeMs === info.mtimeMs) || this.clock() < failure.until)) return fresh();
       try {
-        // Same size, new mtime: the harness rewrote a header line in place (title, padding); no message was added.
-        const entry = cached && info.size === cached.size ? { ...cached }
-          : cached && info.size > cached.size ? await this.extend(handle, cached, info.size)
+        // Appended to the same file: read only the new bytes. Anything else (a replaced inode, a shrink, or the same size with a
+        // new mtime, which is an in-place rewrite) is read afresh; a same-size touch of a file past the full-read limit keeps
+        // the summary, since a fresh read there would cost the head and tail windows for what is almost surely a header edit.
+        const sameFile = cached !== undefined && cached.ino === info.ino;
+        const entry = cached && sameFile && info.size === cached.size && info.size > FULL_READ_LIMIT ? { ...cached }
+          : cached && sameFile && info.size > cached.size ? await this.extend(handle, cached, info.size)
           : await this.initial(handle, info.size);
         entry.size = info.size;
+        entry.ino = info.ino;
         entry.mtimeMs = info.mtimeMs;
         this.failed.delete(path);
         this.entries.delete(path);
@@ -302,11 +308,11 @@ export class TranscriptSummaryCache {
   private async initial(handle: FileHandle, size: number): Promise<CacheEntry> {
     if (size <= FULL_READ_LIMIT) {
       const { lines, bytes } = completeLines(await this.window(handle, 0, size));
-      return { size, mtimeMs: 0, offset: bytes, summary: foldTranscriptLines(EMPTY_SUMMARY, lines) };
+      return { size, mtimeMs: 0, ino: 0, offset: bytes, summary: foldTranscriptLines(EMPTY_SUMMARY, lines) };
     }
     const head = completeLines(await this.window(handle, 0, HEAD_BYTES));
     const tail = await this.tailWindow(handle, size);
-    return { size, mtimeMs: 0, offset: tail.offset, summary: foldTranscriptLines(foldTranscriptLines(EMPTY_SUMMARY, head.lines), tail.lines) };
+    return { size, mtimeMs: 0, ino: 0, offset: tail.offset, summary: foldTranscriptLines(foldTranscriptLines(EMPTY_SUMMARY, head.lines), tail.lines) };
   }
 }
 

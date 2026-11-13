@@ -2,7 +2,7 @@ import { COMPANION_INSTALL_NAME, COMPANION_INSTALL_STEP, LEGACY_COMPANION_NAME }
 import { cleanTitle } from "../shared/labels.js";
 import type { CompanionStatus, Diagnostics, HerdrAgentStatus, HerdrTarget } from "../shared/rpc.js";
 import type { FlatAgent } from "./sort.js";
-import { agoText, cacheSpeech, spoken, type CacheState } from "./time.js";
+import { agoText, cacheSpeech, spoken, stateDurationSpeech, type CacheState } from "./time.js";
 
 /** Pure helpers for the Herdr client UI (no React, no React Native). */
 
@@ -47,18 +47,30 @@ export function statusGlyph(status: HerdrAgentStatus): string {
  * A pane number Herdr didn't give is left out; the raw pane id lives in the details sheet.
  */
 export function placeText(item: Pick<FlatAgent, "workspace" | "tab"> & { agent: { paneNumber: number | null } }, grouped: boolean): string {
-  const parts = [`T${item.tab.number} ${item.tab.label}`.trim()];
+  const parts = [tabText(item.tab)];
   if (item.agent.paneNumber !== null) parts.push(`P${item.agent.paneNumber}`);
   if (!grouped) parts.unshift(`W${item.workspace.number} ${item.workspace.label}`.trim());
   return parts.join(" › ");
 }
 
+/** `T1 build`; Herdr's auto name for a tab is its number, which would read `T1 1`, so that case is just `T1`. */
+export function tabText(tab: { number: number; label: string }): string {
+  const label = tab.label.trim();
+  return label === "" || label === String(tab.number) ? `T${tab.number}` : `T${tab.number} ${label}`;
+}
+
+/** The last two segments of a path with a leading ellipsis, so a long absolute folder stays useful in a narrow line. */
+export function shortPath(path: string): string {
+  const parts = path.split(/[\\/]+/).filter(Boolean);
+  return parts.length <= 2 ? path : `…/${parts.slice(-2).join("/")}`;
+}
+
 /** One sentence for screen readers. Built on the coarse tick only, so it doesn't change every second. */
 export function agentSpeech(item: FlatAgent, label: string, cache: CacheState, nowMs: number): string {
   const { agent } = item;
-  const parts = [label, statusLabel(agent.status).toLowerCase()];
+  const parts = [label, [statusLabel(agent.status).toLowerCase(), stateDurationSpeech(agent.stateChangedAt, agent.stateChangedExact, nowMs)].filter(Boolean).join(" ")];
   if (agent.harness) parts.push(agent.harness);
-  parts.push(`workspace ${item.workspace.number} ${item.workspace.label}`, `tab ${item.tab.number} ${item.tab.label}`);
+  parts.push(`workspace ${item.workspace.number} ${item.workspace.label}`, tabText(item.tab).replace(/^T/, "tab "));
   if (agent.paneNumber !== null) parts.push(`pane ${agent.paneNumber}`);
   const active = agoText(agent.lastActivityAt, nowMs, false);
   if (active && active !== "<1m") parts.push(`active ${spokenAgo(agent.lastActivityAt, nowMs)}`);

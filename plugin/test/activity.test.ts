@@ -1,4 +1,4 @@
-import { appendFile, mkdtemp, rm, truncate, utimes, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, rename, rm, truncate, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -155,14 +155,28 @@ describe("TranscriptSummaryCache", () => {
     expect((await cache.read(path, roots))?.summary).toMatchObject({ sessionStartedAt: "2026-11-12T11:00:00.000Z", lastUserAt: null });
   });
 
-  it("a touched file with the same size is not re-parsed", async () => {
+  it("a file rewritten in place at the same size with a new mtime is read afresh", async () => {
     const path = join(dir, "s.jsonl");
     await writeFile(path, session("2026-11-12T10:00:00.000Z") + "\n");
     const cache = new TranscriptSummaryCache();
     await cache.read(path, roots);
+    await writeFile(path, session("2026-11-12T11:00:00.000Z") + "\n");
     await utimes(path, new Date(), new Date(Date.now() + 5000));
+    expect((await cache.read(path, roots))?.summary.sessionStartedAt).toBe("2026-11-12T11:00:00.000Z");
+  });
+
+  it("a file replaced by another inode at the same size and mtime is read afresh", async () => {
+    const path = join(dir, "s.jsonl");
+    const when = new Date(Date.now() - 60_000);
+    await writeFile(path, session("2026-11-12T10:00:00.000Z") + "\n");
+    await utimes(path, when, when);
+    const cache = new TranscriptSummaryCache();
     await cache.read(path, roots);
-    expect(cache.reads).toBe(1);
+    const next = join(dir, "next.tmp");
+    await writeFile(next, session("2026-11-12T11:00:00.000Z") + "\n");
+    await utimes(next, when, when);
+    await rename(next, path);
+    expect((await cache.read(path, roots))?.summary.sessionStartedAt).toBe("2026-11-12T11:00:00.000Z");
   });
 
   it("a missing file is null, not an error", async () => {

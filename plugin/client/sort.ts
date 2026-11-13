@@ -53,7 +53,7 @@ export function defaultDir(field: SortField): SortDir {
 export function dirLabel(field: SortField, dir: SortDir): string {
   const up = dir === "asc";
   switch (SORT_FIELDS[field].kind) {
-    case "order": return up ? "Herdr order" : "Reverse Herdr order";
+    case "order": return up ? "Pane order" : "Reverse pane order";
     case "time": return up ? "Oldest first" : "Newest first";
     case "cache": return up ? "Soonest cold first" : "Latest cold first";
     case "status": return up ? "Most urgent first" : "Least urgent first";

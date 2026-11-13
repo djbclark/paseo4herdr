@@ -1,5 +1,5 @@
 import type { FlatAgent } from "./sort.js";
-import { agentSpeech, placeText, statusLabel } from "./helpers.js";
+import { agentSpeech, shortPath, statusLabel, tabText } from "./helpers.js";
 import { agoText, cacheColdAtMs, classifyCache, cacheText, clockText, clockTextMs, isCacheAlert, stateDurationText, type CacheState } from "./time.js";
 
 /**
@@ -9,6 +9,8 @@ import { agoText, cacheColdAtMs, classifyCache, cacheText, clockText, clockTextM
 export interface RowTexts {
   /** Line 2: where the agent is (and its folder when that adds something). */
   place: string;
+  /** The pane number (`P1`), shown after the place and never cut; empty when Herdr gave none. */
+  pin: string;
   /** The time and cache facts, joined; may be empty. */
   times: string;
   /** The cache fragment alone, so the row can colour it. */
@@ -17,6 +19,9 @@ export interface RowTexts {
   alert: boolean;
   speech: string;
 }
+
+/** Workspace and tab of the place line, without the pane (see `pin`). */
+const grouped = (item: FlatAgent, isGrouped: boolean): string => (isGrouped ? [] : [`W${item.workspace.number} ${item.workspace.label}`.trim()]).concat(tabText(item.tab)).join(" › ");
 
 const stripAgo = (text: string | null): string | null => (text ? text.replace(/ ago$/, "") : null);
 
@@ -29,19 +34,16 @@ export function rowTexts(item: FlatAgent, label: string, nowMs: number, opts: { 
   const active = agoText(agent.lastActivityAt, nowMs);
   const started = agoText(agent.sessionStartedAt, nowMs, false);
   const showCwd = agent.cwd && (!opts.grouped || agent.cwd !== item.workspace.cwd);
+  const pane = agent.paneNumber !== null ? `P${agent.paneNumber}` : null;
   let place: string;
   let times: string[];
   if (opts.compact) {
     const head = `${statusLabel(agent.status)}${stateDur ? ` ${stateDur}` : ""}`;
-    const where = [
-      opts.grouped ? null : `W${item.workspace.number} ${item.workspace.label}`,
-      `T${item.tab.number} ${item.tab.label}`,
-      agent.paneNumber !== null ? `P${agent.paneNumber}` : null,
-    ];
-    place = [head, ...where].filter(Boolean).join(" · ");
+    place = [head, opts.grouped ? null : `W${item.workspace.number} ${item.workspace.label}`, tabText(item.tab)].filter(Boolean).join(" · ");
     times = [active ? `active ${stripAgo(active)}` : null, cache].filter((part): part is string => Boolean(part));
   } else {
-    place = [placeText(item, opts.grouped), showCwd ? agent.cwd : null].filter(Boolean).join(" · ");
+    // The pane number is returned apart from the place, so a narrow row can shorten the place and still show it.
+    place = [grouped(item, opts.grouped), showCwd ? shortPath(agent.cwd as string) : null].filter(Boolean).join(" · ");
     times = [
       active ? `active ${active}` : null,
       stateDur ? `${agent.status} ${stateDur}` : null,
@@ -52,6 +54,7 @@ export function rowTexts(item: FlatAgent, label: string, nowMs: number, opts: { 
   }
   return {
     place,
+    pin: pane ?? "",
     times: times.join(" · "),
     cache,
     alert: isCacheAlert(state, agent.status),

@@ -138,7 +138,11 @@ function useStyles(theme: Theme, compact: boolean) {
         paddingHorizontal: 12,
         paddingVertical: 6,
       },
-      detail: { flexDirection: "row" as const, gap: 8, flexWrap: "wrap" as const },
+      detail: { flexDirection: "row" as const, gap: 12, alignItems: "flex-start" as const },
+      detailLabel: { width: compact ? 96 : 120, flexShrink: 0 },
+      detailValue: { flex: 1, minWidth: 0 },
+      placeLine: { flexDirection: "row" as const, alignItems: "center" as const },
+      placeText: { flexShrink: 1 },
     };
   }, [theme, compact]);
 }
@@ -260,8 +264,8 @@ function MoreSheet({ item, label, open, onOpenChange, onRestart, navigation, sty
             <Text style={styles.title}>Details</Text>
             {details.map((line) => (
               <View key={line.label} style={styles.detail}>
-                <Text style={styles.muted}>{line.label}</Text>
-                <Text selectable style={styles.text}>{line.value}</Text>
+                <Text style={[styles.muted, styles.detailLabel]}>{line.label}</Text>
+                <Text selectable style={[styles.text, styles.detailValue]}>{line.value}</Text>
               </View>
             ))}
           </View>
@@ -285,8 +289,8 @@ function MoreSheet({ item, label, open, onOpenChange, onRestart, navigation, sty
  * One live Herdr agent. Tapping it opens its Paseo chat. Memoised: the screen's clock tick re-renders every row, and
  * a row repaints only when the text it shows changed (`place`, `times`, `alert`, `speech` are plain values).
  */
-const AgentRow = memo(function AgentRow({ item, place: placeLine, times, alert, speech, compact, theme, styles, navigation, onChanged }: {
-  item: FlatAgent; place: string; times: string; alert: boolean; speech: string; compact: boolean;
+const AgentRow = memo(function AgentRow({ item, place: placeLine, pin, times, alert, speech, compact, theme, styles, navigation, onChanged }: {
+  item: FlatAgent; place: string; pin: string; times: string; alert: boolean; speech: string; compact: boolean;
   theme: Theme; styles: Styles; navigation: Navigation; onChanged(): void;
 }) {
   const { agent } = item;
@@ -377,7 +381,11 @@ const AgentRow = memo(function AgentRow({ item, place: placeLine, times, alert, 
             <Text style={styles.text} numberOfLines={1}>{label}</Text>
             {agent.harness && !compact ? <Text style={styles.muted}>{agent.harness}</Text> : null}
           </View>
-          <Text style={styles.muted} numberOfLines={1} ellipsizeMode="middle">{placeLine}</Text>
+          {/* react-native-web turns middle truncation into end truncation, so the pane number sits outside the shortened text. */}
+          <View style={styles.placeLine}>
+            <Text style={[styles.muted, styles.placeText]} numberOfLines={1}>{placeLine}</Text>
+            {pin ? <Text style={styles.muted}>{compact ? " · " : " › "}{pin}</Text> : null}
+          </View>
           {times ? <Text style={alert ? styles.warning : styles.muted}>{times}</Text> : null}
           {!agent.provider ? <Text style={styles.muted}>No Paseo provider handles this agent kind.</Text> : null}
           {agent.provider && !paseoAgentId ? (
@@ -502,6 +510,7 @@ function WorkspaceCard({
             key={item.agent.terminalId}
             item={item}
             place={texts.place}
+            pin={texts.pin}
             times={texts.times}
             alert={texts.alert}
             speech={texts.speech}
@@ -563,14 +572,14 @@ function useView(): [SortView, (next: SortView) => void] {
  * The screen's one clock. It re-arms itself after each tick with `nextDelay()` (1 s while a countdown is under two minutes,
  * else 15 s) and stops while the app is in the background.
  */
-function useTick(nextDelay: () => number): number {
+function useTick(intervalMs: number): number {
   const [tick, setTick] = useState(0);
-  const delay = useRef(nextDelay);
-  delay.current = nextDelay;
+  // Keyed on the interval: when a countdown first appears or enters its last two minutes the timer restarts at once at 1 s,
+  // not after the 15 s timer that was already running.
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const arm = () => {
-      timer = setTimeout(() => { setTick((n) => n + 1); arm(); }, delay.current());
+      timer = setTimeout(() => { setTick((n) => n + 1); arm(); }, intervalMs);
     };
     const stop = () => { if (timer) clearTimeout(timer); timer = undefined; };
     if (AppState.currentState === "active" || AppState.currentState === undefined) arm();
@@ -579,7 +588,7 @@ function useTick(nextDelay: () => number): number {
       if (next === "active") { setTick((n) => n + 1); arm(); }
     });
     return () => { stop(); subscription.remove(); };
-  }, []);
+  }, [intervalMs]);
   return tick;
 }
 
@@ -705,11 +714,12 @@ export function HerdrOverviewScreen({ theme, layout, navigation }: PluginScreenP
     return view.grouped ? groupAgents(workspaces, view) : [{ workspace: null, agents: flatAgents(workspaces, view) }];
   }, [workspaces, view]);
   const skew = useMemo(() => clockSkewMs(data?.serverNow, query.dataUpdatedAt), [data?.serverNow, query.dataUpdatedAt]);
-  const lastStates = useRef<ReturnType<typeof classifyCache>[]>([]);
-  const tick = useTick(() => tickIntervalMs(lastStates.current));
+  // The interval comes from the clock as of this render, so it changes as soon as the data or a tick moves a countdown into
+  // the fast window.
+  const interval = tickIntervalMs(groups.flatMap((group) => group.agents.map((item) => classifyCache(item.agent.cache, item.agent.status, Date.now() + skew))));
+  const tick = useTick(interval);
   // The device clock corrected by the daemon's, read once per render and handed to every row.
   const nowMs = useMemo(() => Date.now() + skew, [skew, tick, data]);
-  lastStates.current = groups.flatMap((group) => group.agents.map((item) => classifyCache(item.agent.cache, item.agent.status, nowMs)));
   const companionNotice = data ? companionBanner(data.companion, data.ompEnabled) : null;
 
   return (

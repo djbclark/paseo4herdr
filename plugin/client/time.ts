@@ -45,7 +45,16 @@ export function stateDurationText(iso: string | null, exact: boolean, nowMs: num
   if (at === null) return null;
   const span = formatSpan((nowMs - at) / 1000, false);
   if (exact) return span;
-  return span === "<1m" ? "just now (watching)" : `≥ ${span}`;
+  return `≥ ${span === "<1m" ? "0m" : span}`;
+}
+
+/** Sentence form of the state duration for screen readers: `for 3 minutes`, `for at least 3 minutes`; null under a minute and unknown. */
+export function stateDurationSpeech(iso: string | null, exact: boolean, nowMs: number): string | null {
+  const at = parse(iso);
+  if (at === null) return null;
+  const seconds = (nowMs - at) / 1000;
+  if (seconds < 60) return exact ? "for less than a minute" : null;
+  return `for ${exact ? "" : "at least "}${spoken(seconds)}`;
 }
 
 /** Local clock text for the details sheet: `13:10`, with the short date when it isn't today. `timeZone` is for tests. */
@@ -119,7 +128,7 @@ export function cacheText(state: CacheState, compact: boolean): string | null {
     case "cooling":
       return compact ? `cache ${formatSpan(state.secondsLeft)}⚠ est.` : `cache cold in ${formatSpan(state.secondsLeft)} ⚠ (est.)`;
     case "cold":
-      return compact ? "cache cold est." : `cache cold ${formatSpan(-state.secondsLeft)} ago (est.)`;
+      return compact ? "cache cold est." : -state.secondsLeft < 60 ? "cache cold just now (est.)" : `cache cold ${formatSpan(-state.secondsLeft)} ago (est.)`;
   }
 }
 
