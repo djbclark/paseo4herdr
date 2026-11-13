@@ -288,4 +288,12 @@ describe("a stuck read", () => {
     const slow = await cache.readWithin(path, roots, 30);
     expect(slow?.summary.sessionStartedAt).toBe("2026-11-12T10:00:00.000Z");
   });
+  it("a definite no-facts answer drops the last known facts", async () => {
+    const path = join(dir, "gone.jsonl");
+    await writeFile(path, session("2026-11-12T10:00:00.000Z") + "\n");
+    const cache = new TranscriptSummaryCache();
+    expect((await cache.readWithin(path, roots, 1000))?.summary.sessionStartedAt).toBe("2026-11-12T10:00:00.000Z");
+    await rm(path);
+    expect(await cache.readWithin(path, roots, 1000)).toBeNull();
+  });
 });

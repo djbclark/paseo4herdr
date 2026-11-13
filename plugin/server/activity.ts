@@ -258,6 +258,8 @@ export class TranscriptSummaryCache {
     if (!normal) return Promise.resolve(null);
     const existing = this.bounded.get(normal);
     if (existing) return existing;
+    // Over the pending cap the read is skipped, not answered: keep what was last known.
+    if (!this.inflight.has(normal) && this.inflight.size >= MAX_PENDING_READS) return Promise.resolve(this.known.get(normal) ?? null);
     const task = this.read(normal, roots);
     let timer: ReturnType<typeof setTimeout> | undefined;
     const raced = new Promise<TranscriptRead | null>((resolve) => {
@@ -269,7 +271,9 @@ export class TranscriptSummaryCache {
             this.known.set(normal, result);
             while (this.known.size > this.maxEntries) this.known.delete(this.known.keys().next().value as string);
           }
-          resolve(result ?? this.known.get(normal) ?? null);
+          // A settled null is a definite answer (deleted, refused): drop the old facts. Only a timeout or error keeps them.
+          if (!result) this.known.delete(normal);
+          resolve(result);
         },
         () => resolve(this.known.get(normal) ?? null),
       );
