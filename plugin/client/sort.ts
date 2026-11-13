@@ -1,4 +1,4 @@
-import { cleanTitle } from "../shared/labels.js";
+import { agentLabel } from "./helpers.js";
 import type { HerdrAgentStatus, OverviewAgent, OverviewWorkspace } from "../shared/rpc.js";
 import { cacheColdAtMs } from "./time.js";
 
@@ -117,10 +117,11 @@ export function sortValue(field: SortField, item: FlatAgent): number | string | 
     case "herdr": return null;
     case "lastActivity": return time(agent.lastActivityAt);
     case "stateChanged": return time(agent.stateChangedAt);
-    case "cacheCold": return cacheColdAtMs(agent.cache);
+    // A working agent is using its cache (the row says so), so it has no cold-at to rank.
+    case "cacheCold": return agent.status === "working" ? null : cacheColdAtMs(agent.cache);
     case "sessionStarted": return time(agent.sessionStartedAt);
     case "status": return STATUS_RANK[agent.status];
-    case "title": return text(cleanTitle(agent.title) ?? agent.name ?? agent.kind);
+    case "title": return text(agentLabel(agent));
     case "harness": return text(agent.harness ?? agent.kind);
     case "model": return text(agent.model);
     case "workspace": return text(item.workspace.label);

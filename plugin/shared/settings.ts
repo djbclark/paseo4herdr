@@ -50,7 +50,7 @@ export const herdrViewSettings = defineSettings({
   scope: "host",
   version: 1,
   schema: z.object({
-    field: z.string().default("herdr"),
+    field: z.string().max(32).default("herdr"),
     dir: z.enum(["asc", "desc"]).nullable().default(null),
     grouped: z.boolean().default(true),
   }),

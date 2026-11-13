@@ -1,6 +1,6 @@
 import type { FlatAgent } from "./sort.js";
 import { agentSpeech, placeText, statusLabel } from "./helpers.js";
-import { agoText, cacheColdAtMs, classifyCache, cacheText, clockText, isCacheAlert, stateDurationText, type CacheState } from "./time.js";
+import { agoText, cacheColdAtMs, classifyCache, cacheText, clockText, clockTextMs, isCacheAlert, stateDurationText, type CacheState } from "./time.js";
 
 /**
  * The strings one agent row shows, built from plain values so the row component can be memoised on them: the screen's
@@ -23,6 +23,7 @@ const stripAgo = (text: string | null): string | null => (text ? text.replace(/ 
 export function rowTexts(item: FlatAgent, label: string, nowMs: number, opts: { compact: boolean; grouped: boolean }): RowTexts {
   const { agent } = item;
   const state: CacheState = classifyCache(agent.cache, agent.status, nowMs);
+  const speechNow = Math.floor(nowMs / 60_000) * 60_000;
   const cache = cacheText(state, opts.compact);
   const stateDur = stateDurationText(agent.stateChangedAt, agent.stateChangedExact, nowMs);
   const active = agoText(agent.lastActivityAt, nowMs);
@@ -54,7 +55,8 @@ export function rowTexts(item: FlatAgent, label: string, nowMs: number, opts: { 
     times: times.join(" · "),
     cache,
     alert: isCacheAlert(state, agent.status),
-    speech: agentSpeech(item, label, state, nowMs),
+    // The screen-reader sentence changes once a minute, not with the second-by-second countdown.
+    speech: agentSpeech(item, label, classifyCache(agent.cache, agent.status, speechNow), speechNow),
   };
 }
 
@@ -73,7 +75,7 @@ export function detailLines(item: FlatAgent, nowMs: number): DetailLine[] {
   const started = clockText(agent.sessionStartedAt, nowMs);
   if (started) lines.push({ label: "Session started", value: `${started} (session file header)` });
   const coldAt = cacheColdAtMs(agent.cache);
-  const cold = coldAt === null ? null : clockText(new Date(coldAt).toISOString(), nowMs);
+  const cold = coldAt === null ? null : clockTextMs(coldAt, nowMs);
   if (agent.cache && cold) {
     const lifetime = agent.cache.ttlSec >= 3600 ? "1-hour" : "5-min";
     lines.push({ label: "Cache cold", value: `≈ ${cold} (estimate: Anthropic ${lifetime} cache from the last request${agent.cache.ttlKnown ? "" : "; lifetime assumed"})` });

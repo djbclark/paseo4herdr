@@ -1,4 +1,6 @@
-import { open, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, realpath, type FileHandle } from "node:fs/promises";
+import { isAbsolute, sep } from "node:path";
 import type { AgentStatus } from "./herdr/schema.js";
 
 /**
@@ -12,6 +14,26 @@ const ms = (iso: string | null | undefined): number | null => {
   const value = Date.parse(iso);
   return Number.isNaN(value) ? null : value;
 };
+
+const STRICT_ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+const MIN_PLAUSIBLE_MS = Date.UTC(2000, 0, 1);
+const DAY_MS = 86_400_000;
+
+/**
+ * A transcript timestamp, or null. Transcript text is untrusted (a pane chooses which file the plugin reads), so only a
+ * strict ISO-8601 time of at most 40 characters between 2000 and tomorrow is accepted, and it is re-emitted in canonical form.
+ */
+export function cleanIso(value: unknown, nowMs: number = Date.now()): string | null {
+  if (typeof value !== "string" || value.length > 40 || !STRICT_ISO.test(value)) return null;
+  const parsed = Date.parse(value);
+  if (Number.isNaN(parsed) || parsed < MIN_PLAUSIBLE_MS || parsed > nowMs + DAY_MS) return null;
+  return new Date(parsed).toISOString();
+}
+
+/** A model id: at most 200 characters from a conservative set, else null. */
+export function cleanModel(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 && value.length <= 200 && /^[A-Za-z0-9._:/@+-]+$/.test(value) ? value : null;
+}
 
 /** The later of two ISO times; either may be missing. Unparseable text counts as missing. */
 export function laterIso(a: string | null | undefined, b: string | null | undefined): string | null {
@@ -55,18 +77,18 @@ export function foldTranscriptLines(previous: TranscriptSummary, lines: Iterable
     } catch {
       continue;
     }
-    const at = typeof entry.timestamp === "string" && ms(entry.timestamp) !== null ? entry.timestamp : null;
+    const at = cleanIso(entry.timestamp);
     if (entry.type === "session") {
       if (at && !next.sessionStartedAt) next.sessionStartedAt = at;
     } else if (entry.type === "model_change") {
-      if (typeof entry.model === "string" && entry.model) next.model = entry.model;
+      const recorded = cleanModel(entry.model);
+      if (recorded) next.model = recorded;
     } else if (entry.type === "message") {
       const message = typeof entry.message === "object" && entry.message !== null ? (entry.message as Record<string, unknown>) : {};
       if (message.role === "assistant") {
         next.lastAssistantAt = laterIso(next.lastAssistantAt, at);
-        if (typeof message.provider === "string" && typeof message.model === "string" && message.provider && message.model) {
-          next.model = `${message.provider}/${message.model}`;
-        }
+        const recorded = typeof message.provider === "string" && typeof message.model === "string" ? cleanModel(`${message.provider}/${message.model}`) : null;
+        if (recorded) next.model = recorded;
       } else if (message.role === "user" || message.role === "toolResult") {
         next.lastUserAt = laterIso(next.lastUserAt, at);
       }
@@ -90,19 +112,21 @@ export interface TranscriptRead {
 }
 
 /** Past this size the first read takes the file's head (header and first model) and its tail, not the whole file. */
-const FULL_READ_LIMIT = 4 * 1024 * 1024;
+export const FULL_READ_LIMIT = 4 * 1024 * 1024;
 const HEAD_BYTES = 64 * 1024;
 const TAIL_BYTES = 1024 * 1024;
+/** No single read allocates more than this: growth beyond it is folded from the tail window only. */
+export const MAX_READ_BYTES = FULL_READ_LIMIT;
+/** After a failed read, leave the file alone this long (an unchanged file stays left alone until it changes). */
+const FAIL_BACKOFF_MS = 30_000;
+const MAX_CONCURRENT_READS = 4;
 
-async function readRange(path: string, start: number, end: number): Promise<string> {
-  const handle = await open(path, "r");
-  try {
-    const buffer = Buffer.alloc(end - start);
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
-    return buffer.subarray(0, bytesRead).toString("utf8");
-  } finally {
-    await handle.close();
-  }
+/** Reads `[start, end)` through an already-open handle: the caller fstat'ed that handle, so there is no second open by name. */
+async function readRange(handle: FileHandle, start: number, end: number): Promise<string> {
+  const length = Math.max(0, Math.min(end - start, MAX_READ_BYTES));
+  const buffer = Buffer.alloc(length);
+  const { bytesRead } = await handle.read(buffer, 0, length, start);
+  return buffer.subarray(0, bytesRead).toString("utf8");
 }
 
 /** The complete lines of `text` and how many UTF-8 bytes they (with their newlines) cover; a trailing partial line is left out. */
@@ -114,63 +138,140 @@ function completeLines(text: string): { lines: string[]; bytes: number } {
 }
 
 /**
+ * The real path of `path` when it is a `.jsonl` file inside one of `roots` (also resolved), else null. A symlink anywhere in
+ * the path is resolved first, so one that points out of a root is refused.
+ */
+export async function confinedSessionPath(path: string, roots: readonly string[]): Promise<string | null> {
+  if (typeof path !== "string" || path.length > 4096 || !isAbsolute(path) || !path.endsWith(".jsonl") || path.includes("\0")) return null;
+  try {
+    const real = await realpath(path);
+    for (const root of roots) {
+      const realRoot = await realpath(root).catch(() => null);
+      if (realRoot && real.startsWith(realRoot.endsWith(sep) ? realRoot : realRoot + sep)) return real;
+    }
+  } catch {
+    // Missing or unreadable: no facts.
+  }
+  return null;
+}
+
+/** Runs at most `limit` tasks at once. */
+class Limiter {
+  private active = 0;
+  private readonly waiting: (() => void)[] = [];
+  constructor(private readonly limit: number) {}
+  async run<T>(task: () => Promise<T>): Promise<T> {
+    if (this.active >= this.limit) await new Promise<void>((resolve) => this.waiting.push(resolve));
+    this.active++;
+    try { return await task(); } finally {
+      this.active--;
+      this.waiting.shift()?.();
+    }
+  }
+}
+
+/**
  * Per-session-file summaries, cached by path plus mtime and size so a 4-second overview poll doesn't re-parse transcripts.
- * A file that only grew is read from where the last read stopped; a file that shrank is read again from the start.
+ * The path comes from a pane (untrusted), so it is confined to the harness's session directory, opened once without
+ * following symlinks, and checked on that handle to be a regular file. A file that only grew is read from where the last
+ * read stopped, never more than {@link MAX_READ_BYTES} at a time (a bigger jump folds the tail window only). Concurrent
+ * callers share one read per file, at most four files are read at once, and a failed read is not retried until the file
+ * changes or a backoff passes.
  */
 export class TranscriptSummaryCache {
   private readonly entries = new Map<string, CacheEntry>();
-  /** Counts file reads, for tests. */
+  private readonly failed = new Map<string, { size: number; mtimeMs: number; until: number }>();
+  private readonly inflight = new Map<string, Promise<TranscriptRead | null>>();
+  private readonly limiter = new Limiter(MAX_CONCURRENT_READS);
+  /** Counts file reads and the bytes they asked for, for tests. */
   reads = 0;
+  bytesRequested = 0;
 
-  constructor(private readonly maxEntries = 256) {}
+  constructor(private readonly maxEntries = 256, private readonly clock: () => number = Date.now) {}
 
-  async read(path: string): Promise<TranscriptRead | null> {
-    let info;
+  /** `roots`: the directories a session file may live in. A path outside them (or not a regular file) has no facts. */
+  async read(path: string, roots: readonly string[]): Promise<TranscriptRead | null> {
+    const real = await confinedSessionPath(path, roots);
+    if (!real) return null;
+    const running = this.inflight.get(real);
+    if (running) return running;
+    const task = this.limiter.run(() => this.readOnce(real)).finally(() => this.inflight.delete(real));
+    this.inflight.set(real, task);
+    return task;
+  }
+
+  private async readOnce(path: string): Promise<TranscriptRead | null> {
+    let handle: FileHandle;
     try {
-      info = await stat(path);
+      handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     } catch {
       this.entries.delete(path);
       return null;
     }
-    if (!info.isFile()) return null;
-    const cached = this.entries.get(path);
-    if (cached && cached.size === info.size && cached.mtimeMs === info.mtimeMs) return { summary: cached.summary, mtime: new Date(info.mtimeMs).toISOString() };
     try {
-      // Same size, new mtime: the harness rewrote a header line in place (title, padding); no message was added.
-      const entry = cached && info.size === cached.size ? { ...cached }
-        : cached && info.size > cached.size ? await this.extend(path, cached, info.size)
-        : await this.initial(path, info.size);
-      entry.size = info.size;
-      entry.mtimeMs = info.mtimeMs;
-      this.entries.delete(path);
-      this.entries.set(path, entry);
-      while (this.entries.size > this.maxEntries) this.entries.delete(this.entries.keys().next().value as string);
-      return { summary: entry.summary, mtime: new Date(info.mtimeMs).toISOString() };
-    } catch {
-      return null;
+      const info = await handle.stat();
+      if (!info.isFile()) return null;
+      const cached = this.entries.get(path);
+      const fresh = (): TranscriptRead | null => cached ? { summary: cached.summary, mtime: new Date(info.mtimeMs).toISOString() } : null;
+      if (cached && cached.size === info.size && cached.mtimeMs === info.mtimeMs) return fresh();
+      const failure = this.failed.get(path);
+      if (failure && ((failure.size === info.size && failure.mtimeMs === info.mtimeMs) || this.clock() < failure.until)) return fresh();
+      try {
+        // Same size, new mtime: the harness rewrote a header line in place (title, padding); no message was added.
+        const entry = cached && info.size === cached.size ? { ...cached }
+          : cached && info.size > cached.size ? await this.extend(handle, cached, info.size)
+          : await this.initial(handle, info.size);
+        entry.size = info.size;
+        entry.mtimeMs = info.mtimeMs;
+        this.failed.delete(path);
+        this.entries.delete(path);
+        this.entries.set(path, entry);
+        while (this.entries.size > this.maxEntries) this.entries.delete(this.entries.keys().next().value as string);
+        return { summary: entry.summary, mtime: new Date(info.mtimeMs).toISOString() };
+      } catch {
+        this.failed.set(path, { size: info.size, mtimeMs: info.mtimeMs, until: this.clock() + FAIL_BACKOFF_MS });
+        while (this.failed.size > this.maxEntries) this.failed.delete(this.failed.keys().next().value as string);
+        return fresh();
+      }
+    } finally {
+      await handle.close().catch(() => undefined);
     }
   }
 
-  private async extend(path: string, cached: CacheEntry, size: number): Promise<CacheEntry> {
+  private async window(handle: FileHandle, start: number, end: number): Promise<string> {
     this.reads++;
-    const { lines, bytes } = completeLines(await readRange(path, cached.offset, size));
+    this.bytesRequested += Math.min(end - start, MAX_READ_BYTES);
+    return readRange(handle, start, end);
+  }
+
+  private async extend(handle: FileHandle, cached: CacheEntry, size: number): Promise<CacheEntry> {
+    if (size - cached.offset > MAX_READ_BYTES) {
+      // Grew by more than one read: keep what the head said and fold only the newest window.
+      const tail = await this.tailWindow(handle, size);
+      return { ...cached, offset: tail.offset, summary: foldTranscriptLines(cached.summary, tail.lines) };
+    }
+    const { lines, bytes } = completeLines(await this.window(handle, cached.offset, size));
     return { ...cached, offset: cached.offset + bytes, summary: foldTranscriptLines(cached.summary, lines) };
   }
 
-  private async initial(path: string, size: number): Promise<CacheEntry> {
-    this.reads++;
+  /** The newest {@link TAIL_BYTES} of the file, from its first whole line; offset = just past the last whole line (the end when there is none). */
+  private async tailWindow(handle: FileHandle, size: number): Promise<{ lines: string[]; offset: number }> {
+    const text = await this.window(handle, size - TAIL_BYTES, size);
+    const firstNewline = text.indexOf("\n");
+    if (firstNewline < 0) return { lines: [], offset: size };
+    const afterFirst = text.slice(firstNewline + 1);
+    const tail = completeLines(afterFirst);
+    return { lines: tail.lines, offset: size - (Buffer.byteLength(afterFirst, "utf8") - tail.bytes) };
+  }
+
+  private async initial(handle: FileHandle, size: number): Promise<CacheEntry> {
     if (size <= FULL_READ_LIMIT) {
-      const { lines, bytes } = completeLines(await readRange(path, 0, size));
+      const { lines, bytes } = completeLines(await this.window(handle, 0, size));
       return { size, mtimeMs: 0, offset: bytes, summary: foldTranscriptLines(EMPTY_SUMMARY, lines) };
     }
-    const head = completeLines(await readRange(path, 0, HEAD_BYTES));
-    const tailStart = size - TAIL_BYTES;
-    const tailText = await readRange(path, tailStart, size);
-    // The tail starts mid-line: drop everything up to its first newline.
-    const afterFirst = tailText.slice(tailText.indexOf("\n") + 1);
-    const tail = completeLines(afterFirst);
-    const summary = foldTranscriptLines(foldTranscriptLines(EMPTY_SUMMARY, head.lines), tail.lines);
-    return { size, mtimeMs: 0, offset: size - (Buffer.byteLength(afterFirst, "utf8") - tail.bytes), summary };
+    const head = completeLines(await this.window(handle, 0, HEAD_BYTES));
+    const tail = await this.tailWindow(handle, size);
+    return { size, mtimeMs: 0, offset: tail.offset, summary: foldTranscriptLines(foldTranscriptLines(EMPTY_SUMMARY, head.lines), tail.lines) };
   }
 }
 

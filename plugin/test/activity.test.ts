@@ -12,7 +12,7 @@ const msg = (at: string, role: string, extra: object = {}) => line({ type: "mess
 describe("foldTranscriptLines", () => {
   it("takes session start, newest assistant and user times, and the latest model", () => {
     const summary = foldTranscriptLines(EMPTY_SUMMARY, [
-      line({ type: "title", updatedAt: "2026-11-12T09:00:00Z" }),
+      line({ type: "title", updatedAt: "2026-11-12T09:00:00.000Z" }),
       session("2026-11-12T10:00:00.000Z"),
       model("2026-11-12T10:00:01.000Z", "openai/gpt"),
       msg("2026-11-12T10:01:00.000Z", "user"),
@@ -28,11 +28,11 @@ describe("foldTranscriptLines", () => {
     expect(lastRequestAt(summary)).toBe("2026-11-12T10:03:00.000Z");
   });
   it("skips half-written lines and entries with no usable timestamp; never invents a time", () => {
-    const summary = foldTranscriptLines(EMPTY_SUMMARY, ['{"type":"message","timestamp":"2026-11', "garbage", msg("not-a-date", "assistant"), msg("2026-11-12T10:00:00Z", "system")]);
+    const summary = foldTranscriptLines(EMPTY_SUMMARY, ['{"type":"message","timestamp":"2026-11', "garbage", msg("not-a-date", "assistant"), msg("2026-11-12T10:00:00.000Z", "system")]);
     expect(summary).toEqual(EMPTY_SUMMARY);
   });
   it("title and model_change entries do not count as message times", () => {
-    const summary = foldTranscriptLines(EMPTY_SUMMARY, [session("2026-11-12T10:00:00Z"), model("2026-11-12T11:00:00Z", "a/b")]);
+    const summary = foldTranscriptLines(EMPTY_SUMMARY, [session("2026-11-12T10:00:00.000Z"), model("2026-11-12T11:00:00.000Z", "a/b")]);
     expect(summary.lastAssistantAt).toBeNull();
     expect(summary.lastUserAt).toBeNull();
     expect(lastRequestAt(summary)).toBeNull();
@@ -42,22 +42,22 @@ describe("foldTranscriptLines", () => {
 describe("laterIso / pickLastActivity", () => {
   it("laterIso ignores missing or unparseable times", () => {
     expect(laterIso(null, null)).toBeNull();
-    expect(laterIso("2026-11-12T10:00:00Z", null)).toBe("2026-11-12T10:00:00Z");
-    expect(laterIso("junk", "2026-11-12T10:00:00Z")).toBe("2026-11-12T10:00:00Z");
-    expect(laterIso("2026-11-12T11:00:00Z", "2026-11-12T10:00:00Z")).toBe("2026-11-12T11:00:00Z");
+    expect(laterIso("2026-11-12T10:00:00.000Z", null)).toBe("2026-11-12T10:00:00.000Z");
+    expect(laterIso("junk", "2026-11-12T10:00:00.000Z")).toBe("2026-11-12T10:00:00.000Z");
+    expect(laterIso("2026-11-12T11:00:00.000Z", "2026-11-12T10:00:00.000Z")).toBe("2026-11-12T11:00:00.000Z");
   });
   it("picks the newest evidence and says which it was", () => {
-    expect(pickLastActivity({ transcriptAt: "2026-11-12T10:00:00Z", fileMtime: "2026-11-12T10:05:00Z", chatAt: "2026-11-12T10:02:00Z" })).toEqual({ at: "2026-11-12T10:05:00Z", source: "session-file" });
-    expect(pickLastActivity({ transcriptAt: "2026-11-12T10:10:00Z", fileMtime: "2026-11-12T10:05:00Z", chatAt: null })?.source).toBe("transcript");
-    expect(pickLastActivity({ transcriptAt: null, fileMtime: null, chatAt: "2026-11-12T10:02:00Z" })?.source).toBe("chat");
+    expect(pickLastActivity({ transcriptAt: "2026-11-12T10:00:00.000Z", fileMtime: "2026-11-12T10:05:00.000Z", chatAt: "2026-11-12T10:02:00.000Z" })).toEqual({ at: "2026-11-12T10:05:00.000Z", source: "session-file" });
+    expect(pickLastActivity({ transcriptAt: "2026-11-12T10:10:00.000Z", fileMtime: "2026-11-12T10:05:00.000Z", chatAt: null })?.source).toBe("transcript");
+    expect(pickLastActivity({ transcriptAt: null, fileMtime: null, chatAt: "2026-11-12T10:02:00.000Z" })?.source).toBe("chat");
     expect(pickLastActivity({ transcriptAt: null, fileMtime: null, chatAt: null })).toBeNull();
   });
 });
 
 describe("cacheInfo", () => {
-  const summary = { ...EMPTY_SUMMARY, lastAssistantAt: "2026-11-12T10:02:00Z", lastUserAt: "2026-11-12T10:03:00Z" };
+  const summary = { ...EMPTY_SUMMARY, lastAssistantAt: "2026-11-12T10:02:00.000Z", lastUserAt: "2026-11-12T10:03:00.000Z" };
   it("only the anthropic/ provider prefix gets an estimate", () => {
-    expect(cacheInfo("anthropic/claude-x", summary)).toEqual({ provider: "anthropic", anchorAt: "2026-11-12T10:03:00Z", ttlSec: 300, ttlKnown: false });
+    expect(cacheInfo("anthropic/claude-x", summary)).toEqual({ provider: "anthropic", anchorAt: "2026-11-12T10:03:00.000Z", ttlSec: 300, ttlKnown: false });
     expect(cacheInfo("openai-codex/gpt-6.1-sol", summary)).toBeNull();
     expect(cacheInfo("proxy/claude-sonnet", summary)).toBeNull(); // "claude" behind a proxy is no proof
     expect(cacheInfo("claude-sonnet", summary)).toBeNull();
@@ -70,7 +70,7 @@ describe("cacheInfo", () => {
 });
 
 describe("StateStamper", () => {
-  const t0 = Date.parse("2026-11-12T12:00:00Z");
+  const t0 = Date.parse("2026-11-12T12:00:00.000Z");
   it("first sight is a lower bound, not an exact time", () => {
     const stamper = new StateStamper();
     expect(stamper.get("k")).toBeNull();
@@ -109,77 +109,78 @@ describe("StateStamper", () => {
 
 describe("TranscriptSummaryCache", () => {
   let dir: string;
-  beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), "activity-test-")); });
+  let roots: string[];
+  beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), "activity-test-")); roots = [dir]; });
   afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
 
   it("parses once, then serves an unchanged file (same path, mtime and size) from the cache", async () => {
     const path = join(dir, "s.jsonl");
-    await writeFile(path, [session("2026-11-12T10:00:00Z"), msg("2026-11-12T10:01:00Z", "assistant", { provider: "anthropic", model: "c" })].join("\n") + "\n");
+    await writeFile(path, [session("2026-11-12T10:00:00.000Z"), msg("2026-11-12T10:01:00.000Z", "assistant", { provider: "anthropic", model: "c" })].join("\n") + "\n");
     const cache = new TranscriptSummaryCache();
-    const first = await cache.read(path);
-    expect(first?.summary).toMatchObject({ sessionStartedAt: "2026-11-12T10:00:00Z", lastAssistantAt: "2026-11-12T10:01:00Z", model: "anthropic/c" });
+    const first = await cache.read(path, roots);
+    expect(first?.summary).toMatchObject({ sessionStartedAt: "2026-11-12T10:00:00.000Z", lastAssistantAt: "2026-11-12T10:01:00.000Z", model: "anthropic/c" });
     expect(first?.mtime).toMatch(/^\d{4}-/);
-    await cache.read(path);
-    await cache.read(path);
+    await cache.read(path, roots);
+    await cache.read(path, roots);
     expect(cache.reads).toBe(1);
   });
 
   it("reads only the appended tail when the file grows, and keeps what the head said", async () => {
     const path = join(dir, "s.jsonl");
-    await writeFile(path, session("2026-11-12T10:00:00Z") + "\n");
+    await writeFile(path, session("2026-11-12T10:00:00.000Z") + "\n");
     const cache = new TranscriptSummaryCache();
-    await cache.read(path);
-    await appendFile(path, msg("2026-11-12T10:05:00Z", "user") + "\n");
-    const after = await cache.read(path);
-    expect(after?.summary).toMatchObject({ sessionStartedAt: "2026-11-12T10:00:00Z", lastUserAt: "2026-11-12T10:05:00Z" });
+    await cache.read(path, roots);
+    await appendFile(path, msg("2026-11-12T10:05:00.000Z", "user") + "\n");
+    const after = await cache.read(path, roots);
+    expect(after?.summary).toMatchObject({ sessionStartedAt: "2026-11-12T10:00:00.000Z", lastUserAt: "2026-11-12T10:05:00.000Z" });
     expect(cache.reads).toBe(2);
   });
 
   it("holds back a half-written last line until it is complete", async () => {
     const path = join(dir, "s.jsonl");
-    const full = msg("2026-11-12T10:05:00Z", "user");
-    await writeFile(path, session("2026-11-12T10:00:00Z") + "\n" + full.slice(0, 20));
+    const full = msg("2026-11-12T10:05:00.000Z", "user");
+    await writeFile(path, session("2026-11-12T10:00:00.000Z") + "\n" + full.slice(0, 20));
     const cache = new TranscriptSummaryCache();
-    expect((await cache.read(path))?.summary.lastUserAt).toBeNull();
+    expect((await cache.read(path, roots))?.summary.lastUserAt).toBeNull();
     await appendFile(path, full.slice(20) + "\n");
-    expect((await cache.read(path))?.summary.lastUserAt).toBe("2026-11-12T10:05:00Z");
+    expect((await cache.read(path, roots))?.summary.lastUserAt).toBe("2026-11-12T10:05:00.000Z");
   });
 
   it("a file that shrank is read again from the start", async () => {
     const path = join(dir, "s.jsonl");
-    await writeFile(path, [session("2026-11-12T10:00:00Z"), msg("2026-11-12T10:05:00Z", "user"), msg("2026-11-12T10:06:00Z", "user")].join("\n") + "\n");
+    await writeFile(path, [session("2026-11-12T10:00:00.000Z"), msg("2026-11-12T10:05:00.000Z", "user"), msg("2026-11-12T10:06:00.000Z", "user")].join("\n") + "\n");
     const cache = new TranscriptSummaryCache();
-    await cache.read(path);
-    await writeFile(path, session("2026-11-12T11:00:00Z") + "\n");
-    expect((await cache.read(path))?.summary).toMatchObject({ sessionStartedAt: "2026-11-12T11:00:00Z", lastUserAt: null });
+    await cache.read(path, roots);
+    await writeFile(path, session("2026-11-12T11:00:00.000Z") + "\n");
+    expect((await cache.read(path, roots))?.summary).toMatchObject({ sessionStartedAt: "2026-11-12T11:00:00.000Z", lastUserAt: null });
   });
 
   it("a touched file with the same size is not re-parsed", async () => {
     const path = join(dir, "s.jsonl");
-    await writeFile(path, session("2026-11-12T10:00:00Z") + "\n");
+    await writeFile(path, session("2026-11-12T10:00:00.000Z") + "\n");
     const cache = new TranscriptSummaryCache();
-    await cache.read(path);
+    await cache.read(path, roots);
     await utimes(path, new Date(), new Date(Date.now() + 5000));
-    await cache.read(path);
+    await cache.read(path, roots);
     expect(cache.reads).toBe(1);
   });
 
   it("a missing file is null, not an error", async () => {
-    expect(await new TranscriptSummaryCache().read(join(dir, "nope.jsonl"))).toBeNull();
+    expect(await new TranscriptSummaryCache().read(join(dir, "nope.jsonl"), roots)).toBeNull();
   });
 
   it("a large file is summarised from its head and tail", async () => {
     const path = join(dir, "big.jsonl");
     const filler = line({ type: "custom_message", content: "x".repeat(1000) });
-    const body = [session("2026-11-12T10:00:00Z"), model("2026-11-12T10:00:01Z", "anthropic/old")];
+    const body = [session("2026-11-12T10:00:00.000Z"), model("2026-11-12T10:00:01Z", "anthropic/old")];
     for (let i = 0; i < 4500; i++) body.push(filler);
-    body.push(msg("2026-11-12T11:30:00Z", "assistant", { provider: "anthropic", model: "new" }));
+    body.push(msg("2026-11-12T11:30:00.000Z", "assistant", { provider: "anthropic", model: "new" }));
     await writeFile(path, body.join("\n") + "\n");
     const cache = new TranscriptSummaryCache();
-    const read = await cache.read(path);
-    expect(read?.summary).toMatchObject({ sessionStartedAt: "2026-11-12T10:00:00Z", lastAssistantAt: "2026-11-12T11:30:00Z", model: "anthropic/new" });
-    await appendFile(path, msg("2026-11-12T11:40:00Z", "user") + "\n");
-    expect((await cache.read(path))?.summary.lastUserAt).toBe("2026-11-12T11:40:00Z");
+    const read = await cache.read(path, roots);
+    expect(read?.summary).toMatchObject({ sessionStartedAt: "2026-11-12T10:00:00.000Z", lastAssistantAt: "2026-11-12T11:30:00.000Z", model: "anthropic/new" });
+    await appendFile(path, msg("2026-11-12T11:40:00.000Z", "user") + "\n");
+    expect((await cache.read(path, roots))?.summary.lastUserAt).toBe("2026-11-12T11:40:00.000Z");
     await truncate(path, 0);
   });
 });

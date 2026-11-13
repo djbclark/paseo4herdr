@@ -1,7 +1,8 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { TranscriptSummaryCache } from "../server/activity.js";
 import { registerManagementRpcs, type ManagementDeps } from "../server/rpc.js";
 import { ompAdapter } from "../server/harness/omp/adapter.js";
 import { herdrOverviewRpc, type HerdrTarget } from "../shared/rpc.js";
@@ -21,6 +22,7 @@ function setup(overrides: Partial<ManagementDeps> = {}) {
     readTarget: async () => ({ target, ompEnabled: true }),
     ensureReady: async (x) => ({ target: x, version: "0.9.3", autoStarted: false }),
     harnesses: [ompAdapter],
+    sessionRoots: () => [dir],
     companionStatus: async () => ({ state: "current", path: "/fake/ext/paseo4herdr-input.ts" }),
     ...overrides,
   });
@@ -105,12 +107,64 @@ describe("overview facts", () => {
     stop();
   });
 
-  it("a stamp that no longer matches Herdr's status is not reported", async () => {
+  it("a status change shows an exact time at once, with no gap until the next sample", async () => {
     seed([pane("p1")], [agent("p1", { agent_status: "working", state_change_seq: 3 })]);
-    // A long poll interval: only the first sample runs, so the stamp goes stale when the status moves.
-    const { overview } = setup({ statePollMs: 3_600_000 });
-    expect(agents(await overview())[0]!.stateChangedAt).not.toBeNull();
+    let clock = Date.parse("2026-11-12T12:00:00Z");
+    // A long poll interval: only the first sample runs; the overview itself keeps the stamp current.
+    const { overview } = setup({ statePollMs: 3_600_000, now: () => clock });
+    expect(agents(await overview())[0]).toMatchObject({ stateChangedAt: "2026-11-12T12:00:00.000Z", stateChangedExact: false });
+    clock = Date.parse("2026-11-12T12:01:00Z");
     fake.reply("agent.list", { type: "agent_list", agents: [agent("p1", { agent_status: "idle", state_change_seq: 4 })] });
-    expect(agents(await overview())[0]).toMatchObject({ stateChangedAt: null, stateChangedExact: false });
+    expect(agents(await overview())[0]).toMatchObject({ stateChangedAt: "2026-11-12T12:01:00.000Z", stateChangedExact: true });
+  });
+
+  it("without the loop there is no state time at all", async () => {
+    seed([pane("p1")], [agent("p1")]);
+    expect(agents(await setup().overview())[0]).toMatchObject({ stateChangedAt: null, stateChangedExact: false });
+  });
+
+  it("a late overview call after stop does not restart the loop", async () => {
+    seed([pane("p1")], [agent("p1")]);
+    const { overview, stop } = setup({ statePollMs: 10 });
+    await overview();
+    stop();
+    const before = fake.requestsFor("agent.list").length;
+    await overview();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    // The overview's own agent.list is the only new one: no timer is sampling.
+    expect(fake.requestsFor("agent.list").length - before).toBeLessThanOrEqual(1);
+  });
+
+  it("never reads a session path outside the harness's own session directory", async () => {
+    const elsewhere = await mkdtemp(join(tmpdir(), "elsewhere-"));
+    try {
+      const path = join(elsewhere, "a.jsonl");
+      await writeFile(path, [JSON.stringify({ type: "session", timestamp: "2026-11-12T10:00:00.000Z" }), JSON.stringify({ type: "model_change", model: "anthropic/leak" })].join("\n") + "\n");
+      seed([pane("p1")], [agent("p1", sessionOf(path))]);
+      const transcripts = new TranscriptSummaryCache();
+      // Default roots: OMP's sessions directory under PI_CODING_AGENT_DIR, which is not where the file is.
+      const { overview } = setup({ sessionRoots: undefined, env: { PI_CODING_AGENT_DIR: join(dir, "agent") }, transcripts });
+      expect(agents(await overview())[0]).toMatchObject({ model: null, cache: null, lastActivityAt: null, sessionStartedAt: null });
+      expect(transcripts.reads).toBe(0);
+    } finally {
+      await rm(elsewhere, { recursive: true, force: true });
+    }
+  });
+
+  it("reads a session inside OMP's default sessions directory", async () => {
+    const sessions = join(dir, "agent", "sessions", "proj");
+    await mkdir(sessions, { recursive: true });
+    const path = join(sessions, "a.jsonl");
+    await writeFile(path, JSON.stringify({ type: "model_change", model: "anthropic/ok" }) + "\n");
+    seed([pane("p1")], [agent("p1", sessionOf(path))]);
+    const { overview } = setup({ sessionRoots: undefined, env: { PI_CODING_AGENT_DIR: join(dir, "agent") } });
+    expect(agents(await overview())[0]).toMatchObject({ model: "anthropic/ok" });
+  });
+
+  it("another adapter's agent never gets a session read", async () => {
+    const path = await writeSession("c.jsonl", [{ type: "model_change", model: "anthropic/x" }]);
+    seed([pane("p1")], [agent("p1", { ...sessionOf(path), agent: "claude" })]);
+    const { overview } = setup();
+    expect(agents(await overview())[0]).toMatchObject({ model: null });
   });
 });

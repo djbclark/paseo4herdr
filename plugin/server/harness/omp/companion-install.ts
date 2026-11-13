@@ -24,6 +24,11 @@ export function ompExtensionDir(env: NodeJS.ProcessEnv, home: string): string {
   return path.join(home, env.PI_CONFIG_DIR || ".omp", "agent", "extensions");
 }
 
+/** Where OMP keeps its session files: `sessions` beside the extensions directory. */
+export function ompSessionsDir(env: NodeJS.ProcessEnv, home: string): string {
+  return path.join(path.dirname(ompExtensionDir(env, home)), "sessions");
+}
+
 async function readIfExists(file: string): Promise<string | null> {
   return fs.readFile(file, "utf8").catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;

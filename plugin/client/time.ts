@@ -51,7 +51,20 @@ export function stateDurationText(iso: string | null, exact: boolean, nowMs: num
 /** Local clock text for the details sheet: `13:10`, with the short date when it isn't today. `timeZone` is for tests. */
 export function clockText(iso: string | null, nowMs: number, timeZone?: string): string | null {
   const at = parse(iso);
-  if (at === null) return null;
+  return at === null ? null : clockTextMs(at, nowMs, timeZone);
+}
+
+/** As {@link clockText} for a millisecond time; null for a time outside the range a date can hold (never throws). */
+export function clockTextMs(at: number, nowMs: number, timeZone?: string): string | null {
+  if (!Number.isFinite(at) || Math.abs(at) > 8.64e15) return null;
+  try {
+    return formatClock(at, nowMs, timeZone);
+  } catch {
+    return null;
+  }
+}
+
+function formatClock(at: number, nowMs: number, timeZone?: string): string {
   const options = timeZone ? { timeZone } : {};
   const time = new Intl.DateTimeFormat("en-GB", { ...options, hour: "2-digit", minute: "2-digit", hour12: false }).format(at);
   const day = (ms: number) => new Intl.DateTimeFormat("en-GB", { ...options, year: "numeric", month: "2-digit", day: "2-digit" }).format(ms);
@@ -71,7 +84,8 @@ type CacheFacts = NonNullable<OverviewAgent["cache"]>;
 /** When the cache is estimated to go cold, in ms; null when there is no estimate. */
 export function cacheColdAtMs(cache: OverviewAgent["cache"]): number | null {
   const anchor = parse(cache?.anchorAt);
-  return cache && anchor !== null ? anchor + cache.ttlSec * 1000 : null;
+  const coldAt = cache && anchor !== null ? anchor + cache.ttlSec * 1000 : null;
+  return coldAt !== null && Math.abs(coldAt) <= 8.64e15 ? coldAt : null;
 }
 
 /** Seconds left before the "cooling" warning: a minute on the 5-minute lifetime, ten on the 1-hour one. */
@@ -119,9 +133,9 @@ export function cacheSpeech(state: CacheState): string | null {
       return "cache in use";
     case "warm":
     case "cooling":
-      return `cache estimated cold in ${spoken(state.secondsLeft)}`;
+      return state.secondsLeft < 60 ? "cache estimated cold in less than a minute" : `cache estimated cold in ${spoken(state.secondsLeft)}`;
     case "cold":
-      return `cache estimated cold ${spoken(-state.secondsLeft)} ago`;
+      return -state.secondsLeft < 60 ? "cache estimated cold less than a minute ago" : `cache estimated cold ${spoken(-state.secondsLeft)} ago`;
   }
 }
 

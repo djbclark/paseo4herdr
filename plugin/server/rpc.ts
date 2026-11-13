@@ -20,6 +20,7 @@ import { type AgentInfo, type PaneProcessInfo, PaneProcessInfoResultSchema, Pane
 import type { ReadyTarget } from "./herdr/target.js";
 import type { HarnessAdapter } from "./harness/types.js";
 import { adapterAcceptsKind, createResolver, type AdapterResolver } from "./harness/resolve.js";
+import { ompSessionsDir } from "./harness/omp/companion-install.js";
 import { StateStamper, TranscriptSummaryCache, EMPTY_SUMMARY, cacheInfo, laterIso, pickLastActivity, type TranscriptSummary } from "./activity.js";
 
 export interface ManagementDeps {
@@ -57,6 +58,12 @@ export interface ManagementDeps {
    * state-change time. The loop starts with the first overview call and never starts Herdr.
    */
   statePollMs?: number;
+  /**
+   * Directories a harness's session files may be read from (the overview reads a session file's times and model). Default:
+   * OMP's `<agent dir>/sessions` for the `omp` adapter and nothing for any other adapter, so a path another pane reports
+   * is never read.
+   */
+  sessionRoots?(adapterId: string): string[];
   /** Tests: a transcript summary cache to inspect; defaults to a fresh one. */
   transcripts?: TranscriptSummaryCache;
   /** Tests: the clock, in ms. */
@@ -263,6 +270,7 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
   const now = deps.now ?? Date.now;
   const transcripts = deps.transcripts ?? new TranscriptSummaryCache();
   const stamper = new StateStamper();
+  const sessionRoots = deps.sessionRoots ?? ((adapterId: string) => (adapterId === "omp" ? [ompSessionsDir(deps.env ?? process.env, home())] : []));
 
   /** One sample of Herdr's agent list for the state-change stamps. Never starts Herdr; a failed sample changes nothing. */
   const sampleStates = async (): Promise<void> => {
@@ -278,6 +286,7 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
     }
   };
   let pollTimer: ReturnType<typeof setInterval> | undefined;
+  let stopped = false;
   let sampling = false;
   const sampleOnce = async (): Promise<void> => {
     if (sampling) return;
@@ -286,7 +295,7 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
   };
   /** Starts the loop on first use and waits for its first sample, so the first overview already has first-sight stamps. */
   const ensureStatePoll = async (): Promise<void> => {
-    if (!deps.statePollMs || pollTimer) return;
+    if (!deps.statePollMs || pollTimer || stopped) return;
     pollTimer = setInterval(() => { void sampleOnce(); }, deps.statePollMs);
     pollTimer.unref?.();
     await sampleOnce();
@@ -297,9 +306,10 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
     lastActivity: ReturnType<typeof pickLastActivity>;
   }
   /** Session-file facts for one agent; a missing or unreadable file is just "no facts". */
-  const readFacts = async (agent: AgentInfo, chatAt: string | null): Promise<AgentFacts> => {
+  const readFacts = async (agent: AgentInfo, chatAt: string | null, roots: readonly string[]): Promise<AgentFacts> => {
     const session = agent.agent_session;
-    const read = session?.kind === "path" ? await transcripts.read(session.value).catch(() => null) : null;
+    // The path was reported by whatever runs in the pane: only the owning harness's own session directory is read.
+    const read = session?.kind === "path" && roots.length > 0 ? await transcripts.read(session.value, roots).catch(() => null) : null;
     const summary = read?.summary ?? EMPTY_SUMMARY;
     const transcriptAt = laterIso(summary.lastAssistantAt, summary.lastUserAt);
     return { summary, lastActivity: pickLastActivity({ transcriptAt, fileMtime: read?.mtime ?? null, chatAt }) };
@@ -398,10 +408,16 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
       const live = new Map(agents.map((agent) => [agent.terminal_id, agent]));
       const reconciled = reconcileChats(chats, live, target, resolver, await paneProcesses(chats, live, target, resolver, (method, params) => request(socket, method, params)));
       const inputReady = await readInputReady(socket, agents, reconciled, target, enabled);
-      const facts = new Map(await Promise.all(agents.map(async (agent): Promise<[string, AgentFacts]> => [
-        agent.terminal_id,
-        await readFacts(agent, reconciled.get(chatKey(target.herdrSession, agent.terminal_id))?.owner.lastActivityAt ?? null),
-      ])));
+      const facts = new Map(await Promise.all(agents.map(async (agent): Promise<[string, AgentFacts]> => {
+        const owner = ownerAdapter(reconciled, agent, target, resolver);
+        const roots = owner && enabled(owner.id) ? sessionRoots(owner.id) : [];
+        return [agent.terminal_id, await readFacts(agent, reconciled.get(chatKey(target.herdrSession, agent.terminal_id))?.owner.lastActivityAt ?? null, roots)];
+      })));
+      // Keep each stamp current with what Herdr says now (idempotent with the loop), so a change never leaves a gap before the next sample.
+      if (deps.statePollMs) {
+        const seen = now();
+        for (const agent of agents) stamper.observe(chatKey(target.herdrSession, agent.terminal_id), agent.agent_status, agent.state_change_seq, seen);
+      }
       // Pane numbers: Herdr's own when it sends one, else the 1-based position among the tab's panes in list order.
       const paneNumber = new Map<string, number>();
       const perTab = new Map<string, number>();
@@ -598,6 +614,7 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
 
   /** Stops the state-change loop (plugin shutdown). */
   return () => {
+    stopped = true;
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = undefined;
   };

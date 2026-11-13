@@ -527,13 +527,35 @@ function WorkspaceCard({
 function useView(): [SortView, (next: SortView) => void] {
   const settings = useSettings(herdrViewSettings);
   const [local, setLocal] = useState<SortView | null>(null);
-  const { status, save } = settings;
-  const revision = status === "ready" ? settings.revision : null;
-  const stored = status === "ready" ? normalizeView(settings.values) : DEFAULT_VIEW;
+  const { status, save, reload } = settings;
+  const ready = status === "ready" ? settings : null;
+  const revision = ready ? ready.revision : null;
+  // Read out as primitives: the SDK hands back a new `values` object every render, which would otherwise re-sort and repaint every row each tick.
+  const field = ready?.values.field;
+  const dir = ready?.values.dir;
+  const grouped = ready?.values.grouped;
+  const stored = useMemo(() => (ready ? normalizeView({ field, dir, grouped }) : DEFAULT_VIEW), [ready !== null, field, dir, grouped]);
+  // The newest choice not yet saved. Saves go one at a time against the revision the last save produced, so two quick
+  // choices (or one made while the setting is still loading) are not lost to a stale revision.
+  const wanted = useRef<SortView | null>(null);
+  const saving = useRef(false);
+  const [saved, setSaved] = useState(0);
+  useEffect(() => {
+    const next = wanted.current;
+    if (!next || revision === null || saving.current) return;
+    if (next.field === stored.field && next.dir === stored.dir && next.grouped === stored.grouped) {
+      wanted.current = null;
+      return;
+    }
+    saving.current = true;
+    void save({ field: next.field, dir: next.dir, grouped: next.grouped }, revision)
+      .then((ok) => { if (!ok) return reload(); })
+      .finally(() => { saving.current = false; setSaved((n) => n + 1); });
+  }, [revision, stored, save, reload, local, saved]);
   const update = useCallback((next: SortView) => {
+    wanted.current = next;
     setLocal(next);
-    if (revision !== null) void save({ field: next.field, dir: next.dir, grouped: next.grouped }, revision);
-  }, [save, revision]);
+  }, []);
   return [local ?? stored, update];
 }
 

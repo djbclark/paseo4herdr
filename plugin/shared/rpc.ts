@@ -81,19 +81,19 @@ export const overviewAgentSchema = z.object({
   /** Herdr's 1-based pane number within its tab (position in `pane.list` when Herdr sends no number); null when unknown. */
   paneNumber: z.number().int().nullable().default(null),
   /** ISO. Newest of the transcript's last message, the session file's mtime, and the Paseo chat's last activity. */
-  lastActivityAt: z.string().nullable().default(null),
+  lastActivityAt: z.string().max(40).nullable().default(null),
   lastActivitySource: z.enum(["transcript", "session-file", "chat"]).nullable().default(null),
   /** ISO. When the plugin saw the status or `state_change_seq` change; a lower bound unless `stateChangedExact`. */
-  stateChangedAt: z.string().nullable().default(null),
+  stateChangedAt: z.string().max(40).nullable().default(null),
   /** False = the plugin has only watched since `stateChangedAt`, so the real change was at or before it. */
   stateChangedExact: z.boolean().default(false),
   stateChangeSeq: z.number().int().nonnegative().default(0),
   /** ISO, from the session file's header. */
-  sessionStartedAt: z.string().nullable().default(null),
+  sessionStartedAt: z.string().max(40).nullable().default(null),
   /** ISO, from the newest assistant message in the transcript. */
-  lastAssistantAt: z.string().nullable().default(null),
+  lastAssistantAt: z.string().max(40).nullable().default(null),
   /** `provider/id` as the harness recorded it. */
-  model: z.string().nullable().default(null),
+  model: z.string().max(200).nullable().default(null),
   /**
    * Prompt-cache estimate. Present only for a model whose provider prefix is `anthropic/`; null for any other or unknown
    * model. `anchorAt` is the last API request (newest of the last assistant and user/tool-result message), null when the
@@ -101,7 +101,7 @@ export const overviewAgentSchema = z.object({
    */
   cache: z.object({
     provider: z.literal("anthropic"),
-    anchorAt: z.string().nullable(),
+    anchorAt: z.string().max(40).nullable(),
     ttlSec: z.number().int().positive(),
     ttlKnown: z.boolean(),
   }).nullable().default(null),
