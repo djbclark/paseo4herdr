@@ -38,14 +38,14 @@ export function agoText(iso: string | null, nowMs: number, seconds = true): stri
 
 /**
  * How long an agent has been in its state. Never shows seconds (the plugin samples Herdr, so the time is only good to the
- * poll interval). A time that is only a lower bound (the plugin started watching then) reads `≥ 52m`.
+ * poll interval). A time that is only a lower bound (the plugin started watching then) reads `≥ 52m`; under a minute either way it reads `<1m`.
  */
 export function stateDurationText(iso: string | null, exact: boolean, nowMs: number): string | null {
   const at = parse(iso);
   if (at === null) return null;
   const span = formatSpan((nowMs - at) / 1000, false);
   if (exact) return span;
-  return `≥ ${span === "<1m" ? "0m" : span}`;
+  return span === "<1m" ? span : `≥ ${span}`;
 }
 
 /** Sentence form of the state duration for screen readers: `for 3 minutes`, `for at least 3 minutes`; null under a minute and unknown. */

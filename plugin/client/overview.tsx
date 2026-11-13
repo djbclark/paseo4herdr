@@ -141,8 +141,9 @@ function useStyles(theme: Theme, compact: boolean) {
       detail: { flexDirection: "row" as const, gap: 12, alignItems: "flex-start" as const },
       detailLabel: { width: compact ? 96 : 120, flexShrink: 0 },
       detailValue: { flex: 1, minWidth: 0 },
-      placeLine: { flexDirection: "row" as const, alignItems: "center" as const },
-      placeText: { flexShrink: 1 },
+      placeLine: { flexDirection: "row" as const, alignItems: "center" as const, flexWrap: "nowrap" as const, overflow: "hidden" as const },
+      placeText: { flexShrink: 1, minWidth: 0 },
+      placePin: { flexShrink: 0 },
     };
   }, [theme, compact]);
 }
@@ -384,7 +385,7 @@ const AgentRow = memo(function AgentRow({ item, place: placeLine, pin, times, al
           {/* react-native-web turns middle truncation into end truncation, so the pane number sits outside the shortened text. */}
           <View style={styles.placeLine}>
             <Text style={[styles.muted, styles.placeText]} numberOfLines={1}>{placeLine}</Text>
-            {pin ? <Text style={styles.muted}>{compact ? " · " : " › "}{pin}</Text> : null}
+            {pin ? <Text style={[styles.muted, styles.placePin]} numberOfLines={1}>{`${compact ? " · " : " › "}${pin}`}</Text> : null}
           </View>
           {times ? <Text style={alert ? styles.warning : styles.muted}>{times}</Text> : null}
           {!agent.provider ? <Text style={styles.muted}>No Paseo provider handles this agent kind.</Text> : null}

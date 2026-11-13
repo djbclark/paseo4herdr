@@ -232,3 +232,60 @@ describe("withDeadline", () => {
     expect(Date.now() - started).toBeLessThan(1000);
   });
 });
+
+describe("re-check after the open", () => {
+  it("a parent swapped for a symlink between the check and the open is refused", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "outside-"));
+    try {
+      await mkdir(join(dir, "d"));
+      await writeFile(join(dir, "d", "x.jsonl"), session("2026-11-12T10:00:00.000Z") + "\n");
+      await writeFile(join(outside, "x.jsonl"), session("2026-11-12T11:00:00.000Z") + "\n");
+      const cache = new TranscriptSummaryCache();
+      const real = await confinedSessionPath(join(dir, "d", "x.jsonl"), roots);
+      expect(real).not.toBeNull();
+      // The swap lands after the check and before readOnce looks at the name.
+      await rm(join(dir, "d"), { recursive: true });
+      await symlink(outside, join(dir, "d"));
+      const result = await (cache as unknown as { readOnce(p: string, r: readonly string[]): Promise<unknown> }).readOnce(real as string, roots);
+      expect(result).toBeNull();
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("a stuck read", () => {
+  const stuck = (cache: TranscriptSummaryCache) => {
+    (cache as unknown as { readOnce: () => Promise<never> }).readOnce = () => new Promise(() => undefined);
+  };
+  it("does not start a second read for a path that has one, and adds no work per poll", async () => {
+    await writeFile(join(dir, "a.jsonl"), session("2026-11-12T10:00:00.000Z") + "\n");
+    const cache = new TranscriptSummaryCache();
+    let started = 0;
+    (cache as unknown as { readOnce: () => Promise<never> }).readOnce = () => { started++; return new Promise(() => undefined); };
+    for (let i = 0; i < 20; i++) void cache.readWithin(join(dir, "a.jsonl"), roots, 30);
+    await new Promise((r) => setTimeout(r, 80));
+    for (let i = 0; i < 20; i++) expect(await cache.readWithin(join(dir, "a.jsonl"), roots, 30)).toBeNull();
+    expect(started).toBe(1);
+  });
+  it("caps the number of distinct pending paths", async () => {
+    const cache = new TranscriptSummaryCache();
+    stuck(cache);
+    const names = Array.from({ length: 100 }, (_, i) => join(dir, `p${i}.jsonl`));
+    await Promise.all(names.map((n) => writeFile(n, session("2026-11-12T10:00:00.000Z") + "\n")));
+    for (const n of names) void cache.read(n, roots);
+    await new Promise((r) => setTimeout(r, 50));
+    expect((cache as unknown as { inflight: Map<string, unknown> }).inflight.size).toBeLessThanOrEqual(32);
+  });
+  it("answers with the last known facts when the read is slow", async () => {
+    const path = join(dir, "k.jsonl");
+    await writeFile(path, session("2026-11-12T10:00:00.000Z") + "\n");
+    const cache = new TranscriptSummaryCache();
+    const first = await cache.readWithin(path, roots, 1000);
+    expect(first?.summary.sessionStartedAt).toBe("2026-11-12T10:00:00.000Z");
+    stuck(cache);
+    await appendFile(path, msg("2026-11-12T11:00:00.000Z", "assistant") + "\n");
+    const slow = await cache.readWithin(path, roots, 30);
+    expect(slow?.summary.sessionStartedAt).toBe("2026-11-12T10:00:00.000Z");
+  });
+});

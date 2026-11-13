@@ -322,7 +322,7 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
   const readFacts = async (agent: AgentInfo, chatAt: string | null, roots: readonly string[]): Promise<AgentFacts> => {
     const session = agent.agent_session;
     // The path was reported by whatever runs in the pane: only the owning harness's own session directory is read.
-    const read = session?.kind === "path" && roots.length > 0 ? await withDeadline(transcripts.read(session.value, roots).catch(() => null), FACTS_DEADLINE_MS) : null;
+    const read = session?.kind === "path" && roots.length > 0 ? await withDeadline(transcripts.readWithin(session.value, roots, FACTS_DEADLINE_MS).catch(() => null), FACTS_DEADLINE_MS + 500) : null;
     const summary = read?.summary ?? EMPTY_SUMMARY;
     const transcriptAt = laterIso(summary.lastAssistantAt, summary.lastUserAt);
     return { summary, lastActivity: pickLastActivity({ transcriptAt, fileMtime: read?.mtime ?? null, chatAt }) };

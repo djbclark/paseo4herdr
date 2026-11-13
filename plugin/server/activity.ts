@@ -122,6 +122,8 @@ export const MAX_READ_BYTES = FULL_READ_LIMIT;
 /** After a failed read, leave the file alone this long (an unchanged file stays left alone until it changes). */
 const FAIL_BACKOFF_MS = 30_000;
 const MAX_CONCURRENT_READS = 2;
+/** Distinct session paths that may be reading or queued at once; beyond it a new path simply has no facts this poll. */
+const MAX_PENDING_READS = 32;
 
 /** Reads `[start, end)` through an already-open handle: the caller fstat'ed that handle, so there is no second open by name. */
 async function readRange(handle: FileHandle, start: number, end: number): Promise<Buffer> {
@@ -161,25 +163,33 @@ export function lexicallyInside(path: unknown, roots: readonly string[]): string
  * The real path of `path` when it is a `.jsonl` file inside one of `roots` (also resolved), else null. A symlink anywhere in
  * the path is resolved first, so one that points out of a root is refused.
  *
- * Residual: between this check and the later `open`, a process that can write inside the session directory could swap a
- * parent directory for a symlink. {@link TranscriptSummaryCache} narrows that to a double race (it compares the opened
- * handle with an `lstat` of the checked path, and on Linux with `/proc/self/fd`) but cannot close it on macOS, which has no
- * path-of-descriptor check we can use. What a winner gets is a regular file's existence, mtime, and any value of the strict
- * timestamp/model shape; the attacker already runs as the same user.
+ * Residual: this is a check by name, and a later `open` is by name too. A process that can write inside the session directory
+ * can swap a parent directory for a symlink in between. {@link TranscriptSummaryCache} re-resolves the path after the open and
+ * requires the same real path, still inside the root, with the opened handle's dev/ino, so a winner has to swap the directory
+ * in before the open and out again before that re-check: a narrow double race, not an impossible one. On Linux the handle's
+ * `/proc/self/fd` link is compared too, which closes it. macOS offers no path-of-descriptor lookup to Node (`F_GETPATH` is not
+ * exposed), so there the race stays winnable with luck. What a winner gets is a regular file's existence, mtime, and any value
+ * of the strict timestamp/model shape; the attacker already runs as the same user and the facts go to that user's own devices.
  */
 export async function confinedSessionPath(path: string, roots: readonly string[]): Promise<string | null> {
   const normal = lexicallyInside(path, roots);
   if (!normal) return null;
   try {
     const real = await realpath(normal);
-    for (const root of roots) {
-      const realRoot = await realpath(root).catch(() => null);
-      if (realRoot && real.startsWith(realRoot.endsWith(sep) ? realRoot : realRoot + sep)) return real;
-    }
+    return (await insideRealRoots(real, roots)) ? real : null;
   } catch {
     // Missing or unreadable: no facts.
   }
   return null;
+}
+
+/** Whether an already-resolved path lies inside one of `roots` once those are resolved too. */
+async function insideRealRoots(real: string, roots: readonly string[]): Promise<boolean> {
+  for (const root of roots) {
+    const realRoot = await realpath(root).catch(() => null);
+    if (realRoot && real.startsWith(realRoot.endsWith(sep) ? realRoot : realRoot + sep)) return true;
+  }
+  return false;
 }
 
 /** Runs at most `limit` tasks at once. */
@@ -187,6 +197,7 @@ class Limiter {
   private active = 0;
   private readonly waiting: (() => void)[] = [];
   constructor(private readonly limit: number) {}
+  get queued(): number { return this.waiting.length; }
   async run<T>(task: () => Promise<T>): Promise<T> {
     if (this.active >= this.limit) await new Promise<void>((resolve) => this.waiting.push(resolve));
     this.active++;
@@ -210,6 +221,10 @@ export class TranscriptSummaryCache {
   private readonly failed = new Map<string, { size: number; mtimeMs: number; until: number }>();
   private readonly inflight = new Map<string, Promise<TranscriptRead | null>>();
   private readonly limiter = new Limiter(MAX_CONCURRENT_READS);
+  /** One deadline-raced promise per pending read, shared by every caller of {@link readWithin}. */
+  private readonly bounded = new Map<string, Promise<TranscriptRead | null>>();
+  /** The last facts read for each input path, served when a later read is slow. */
+  private readonly known = new Map<string, TranscriptRead>();
   /** Counts file reads and the bytes they asked for, for tests. */
   reads = 0;
   bytesRequested = 0;
@@ -224,15 +239,48 @@ export class TranscriptSummaryCache {
     if (!normal) return null;
     const running = this.inflight.get(normal);
     if (running) return running;
+    if (this.inflight.size >= MAX_PENDING_READS) return null;
     const task = this.limiter.run(async () => {
       const real = await confinedSessionPath(normal, roots);
-      return real ? this.readOnce(real) : null;
+      return real ? this.readOnce(real, roots) : null;
     }).finally(() => this.inflight.delete(normal));
     this.inflight.set(normal, task);
     return task;
   }
 
-  private async readOnce(path: string): Promise<TranscriptRead | null> {
+  /**
+   * As {@link read}, but answers within `ms`: a read still running then answers with the last facts read for this path (or
+   * null). The deadline is armed once per pending read, not once per caller, so a stuck read adds nothing for each poll
+   * that asks about it; a path with a read in flight never starts a second one.
+   */
+  readWithin(path: string, roots: readonly string[], ms: number): Promise<TranscriptRead | null> {
+    const normal = lexicallyInside(path, roots);
+    if (!normal) return Promise.resolve(null);
+    const existing = this.bounded.get(normal);
+    if (existing) return existing;
+    const task = this.read(normal, roots);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const raced = new Promise<TranscriptRead | null>((resolve) => {
+      timer = setTimeout(() => resolve(this.known.get(normal) ?? null), ms);
+      task.then(
+        (result) => {
+          if (result) {
+            this.known.delete(normal);
+            this.known.set(normal, result);
+            while (this.known.size > this.maxEntries) this.known.delete(this.known.keys().next().value as string);
+          }
+          resolve(result ?? this.known.get(normal) ?? null);
+        },
+        () => resolve(this.known.get(normal) ?? null),
+      );
+    });
+    this.bounded.set(normal, raced);
+    const done = () => { clearTimeout(timer); this.bounded.delete(normal); };
+    task.then(done, done);
+    return raced;
+  }
+
+  private async readOnce(path: string, roots: readonly string[]): Promise<TranscriptRead | null> {
     let handle: FileHandle;
     let checked;
     try {
@@ -248,6 +296,11 @@ export class TranscriptSummaryCache {
       // file, and not a second name for a file elsewhere (a hardlink out of the session directory).
       if (!info.isFile() || info.nlink !== 1 || info.dev !== checked.dev || info.ino !== checked.ino) return null;
       if (process.platform === "linux" && (await readlink(`/proc/self/fd/${handle.fd}`).catch(() => null)) !== path) return null;
+      // Resolve again now that the file is open: the same real path, still inside the root, and the name still points at the
+      // inode we hold. A directory swapped in before the open must be swapped back before this point to get past it.
+      if ((await realpath(path).catch(() => null)) !== path || !(await insideRealRoots(path, roots))) return null;
+      const after = await lstat(path).catch(() => null);
+      if (!after || after.dev !== info.dev || after.ino !== info.ino) return null;
       const cached = this.entries.get(path);
       const fresh = (): TranscriptRead | null => cached ? { summary: cached.summary, mtime: new Date(info.mtimeMs).toISOString() } : null;
       if (cached && cached.ino === info.ino && cached.size === info.size && cached.mtimeMs === info.mtimeMs) return fresh();

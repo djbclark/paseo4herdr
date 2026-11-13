@@ -37,7 +37,7 @@ describe("stateDurationText", () => {
   });
   it("inexact: a lower bound", () => {
     expect(stateDurationText(iso(52 * 60), false, NOW)).toBe("≥ 52m");
-    expect(stateDurationText(iso(10), false, NOW)).toBe("≥ 0m");
+    expect(stateDurationText(iso(10), false, NOW)).toBe("<1m");
   });
 });
 

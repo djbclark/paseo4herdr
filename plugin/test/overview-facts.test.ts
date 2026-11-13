@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -37,6 +37,7 @@ const noChats = { agents: { list: async () => ({ entries: [], pageInfo: { hasMor
 
 const pane = (id: string, extra: object = {}) => ({ pane_id: id, terminal_id: `t-${id}`, workspace_id: "w1", tab_id: "tab1", focused: false, cwd: "/a", agent_status: "idle", revision: 1, ...extra });
 const agent = (id: string, extra: object = {}) => ({ terminal_id: `t-${id}`, name: null, agent: "omp", agent_status: "idle", workspace_id: "w1", tab_id: "tab1", pane_id: id, focused: false, cwd: "/a", revision: 1, state_change_seq: 7, ...extra });
+const line = (value: object) => JSON.stringify(value);
 const sessionOf = (path: string) => ({ agent_session: { source: "omp", agent: "omp", kind: "path", value: path } });
 
 function seed(panes: object[], agents: object[]) {
@@ -168,13 +169,21 @@ describe("overview facts", () => {
     expect(agents(await overview())[0]).toMatchObject({ model: null });
   });
 
-  it("a session read that hangs does not stall the overview", async () => {
-    seed([pane("p1")], [agent("p1", sessionOf(join(dir, "hung.jsonl")))]);
-    const hung = { read: () => new Promise(() => undefined), reads: 0 } as unknown as TranscriptSummaryCache;
-    const { overview } = setup({ transcripts: hung });
+  it("a session read that hangs does not stall the overview, and the last facts stay", async () => {
+    const file = join(dir, "hung.jsonl");
+    await writeFile(file, line({ type: "session", id: "s", timestamp: "2026-11-12T10:00:00.000Z" }) + "\n" + line({ type: "model_change", timestamp: "2026-11-12T10:00:01.000Z", model: "anthropic/known" }) + "\n");
+    seed([pane("p1")], [agent("p1", sessionOf(file))]);
+    const cache = new TranscriptSummaryCache();
+    const { overview } = setup({ transcripts: cache });
+    expect(agents(await overview())[0]).toMatchObject({ model: "anthropic/known" });
+    (cache as unknown as { readOnce: () => Promise<never> }).readOnce = () => new Promise(() => undefined);
+    await appendFile(file, line({ type: "model_change", timestamp: "2026-11-12T10:00:02.000Z", model: "anthropic/new" }) + "\n");
     const started = Date.now();
     const [row] = agents(await overview());
-    expect(row).toMatchObject({ model: null, lastActivityAt: null, status: "idle" });
+    expect(row).toMatchObject({ model: "anthropic/known", status: "idle" });
     expect(Date.now() - started).toBeLessThan(4000);
+    const again = Date.now();
+    await overview();
+    expect(Date.now() - again).toBeLessThan(500);
   });
 });

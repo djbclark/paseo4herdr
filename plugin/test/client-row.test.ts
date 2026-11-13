@@ -70,7 +70,7 @@ describe("place line", () => {
 
 describe("wording", () => {
   it("a state first seen just now reads as a lower bound, like later ones", () => {
-    expect(stateDurationText(new Date(NOW - 10_000).toISOString(), false, NOW)).toBe("≥ 0m");
+    expect(stateDurationText(new Date(NOW - 10_000).toISOString(), false, NOW)).toBe("<1m");
     expect(stateDurationText(new Date(NOW - 52 * 60_000).toISOString(), false, NOW)).toBe("≥ 52m");
   });
   it("a cache that went cold a moment ago does not say 0s ago", () => {
