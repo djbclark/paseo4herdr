@@ -167,22 +167,28 @@ function useStyles(theme: Theme, compact: boolean) {
 }
 type Styles = ReturnType<typeof useStyles>;
 
+/** Wide enough for "Refreshing…" so the polling label flip never resizes the button and shifts the controls beside it. */
+const REFRESH_BUTTON_MIN_WIDTH = 120;
+
 function Button({
   label,
   onPress,
   styles,
   disabled,
   secondary,
+  minWidth,
 }: {
   label: string;
   onPress(): void;
   styles: Styles;
   disabled?: boolean;
   secondary?: boolean;
+  /** Keeps a button whose label changes (Refresh / Refreshing…) one width, so its neighbours do not shift. */
+  minWidth?: number;
 }) {
   const box = secondary ? styles.secondary : disabled ? styles.buttonDisabled : styles.button;
   return (
-    <Pressable accessibilityRole="button" disabled={disabled} onPress={onPress} style={box}>
+    <Pressable accessibilityRole="button" disabled={disabled} onPress={onPress} style={minWidth ? [box, { minWidth, alignItems: "center" as const }] : box}>
       <Text style={secondary ? styles.text : styles.buttonText}>{label}</Text>
     </Pressable>
   );
@@ -963,7 +969,7 @@ export function HerdrOverviewScreen({ theme, layout, navigation }: PluginScreenP
     <ScrollView style={styles.screen} contentContainerStyle={styles.root}>
       <View style={styles.row}>
         <Text style={styles.title}>Herdr</Text>
-        <Button label={query.isFetching ? "Refreshing…" : "Refresh"} secondary onPress={refresh} styles={styles} />
+        <Button label={query.isFetching ? "Refreshing…" : "Refresh"} secondary minWidth={REFRESH_BUTTON_MIN_WIDTH} onPress={refresh} styles={styles} />
         {navigation ? <Button label="Open existing agent" secondary onPress={() => setPicking("agent")} styles={styles} /> : null}
         {navigation ? <Button label="Open existing terminal" secondary onPress={() => setPicking("terminal")} styles={styles} /> : null}
       </View>
