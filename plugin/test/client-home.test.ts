@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { bindHerdrChat, bindNewPane, createHerdrChat } from "../client/actions.js";
+import { bindHerdrChat, bindNewPane, createHerdrChat, openHerdrTerminal } from "../client/actions.js";
 import { registerHerdrHome } from "../client/home.js";
 import { createPaseoApi } from "@getpaseo/client";
 
@@ -29,6 +29,34 @@ describe("createHerdrChat", () => {
     expect(result.note).toMatch(/Opened a new terminal in proj/);
     expect(open).not.toHaveBeenCalled();
   });
+  it("opens the new pane as a Paseo terminal when shell input is off and the pane can be attached", async () => {
+    const create = vi.fn(async () => ({}));
+    const open = vi.fn(async () => ({ id: "paseo-ws", terminals: { create } }));
+    const attach = { command: "/bin/herdr", args: ["terminal", "attach", "t-9"] };
+    const result = await createHerdrChat({ workspaces: { open } } as never, async () => ({}), "/repo", async () => ({ ...pane, shellInput: false, attach }));
+    expect(result).toEqual({ agentId: null, workspaceId: "paseo-ws", note: null });
+    expect(open).toHaveBeenCalledExactlyOnceWith("/repo");
+    expect(create).toHaveBeenCalledExactlyOnceWith({ name: "Herdr: proj", command: "/bin/herdr", args: ["terminal", "attach", "t-9"] });
+  });
+  it("still prefers a bound chat when shell input is on, whatever the pane can attach", async () => {
+    const createAgent = vi.fn(async () => ({ id: "chat-5" }));
+    const openProject = vi.fn(async () => ({ workspace: { id: "w", workspaceDirectory: "/repo" } }));
+    const paseo = createPaseoApi({ openProject, createAgent } as never);
+    try {
+      const attach = { command: "/bin/herdr", args: ["terminal", "attach", "t-9"] };
+      expect(await createHerdrChat(paseo, async () => ({}), "/repo", async () => ({ ...pane, attach }))).toEqual({ agentId: "chat-5", note: null });
+    } finally { await paseo.dispose(); }
+  });
+  it("names the settings path in the note when the pane can't be opened as a terminal either", async () => {
+    const result = await createHerdrChat({} as never, async () => ({}), "/repo", async () => ({ ...pane, shellInput: false, attach: null }));
+    expect(result.agentId).toBeNull();
+    expect(result.note).toContain("Settings > Plugins > herdr-harness > Allow shell input");
+  });
+  it("says so when the terminal can't be opened after the pane exists", async () => {
+    const open = vi.fn(async () => { throw new Error("Folder unavailable"); });
+    const attach = { command: "/bin/herdr", args: [] };
+    await expect(createHerdrChat({ workspaces: { open } } as never, async () => ({}), "/repo", async () => ({ ...pane, shellInput: false, attach }))).rejects.toThrow(/Opened a new terminal in proj, but couldn't open it here: Folder unavailable/);
+  });
   it("resolves a ~ folder through the daemon and passes the absolute path on", async () => {
     const resolve = vi.fn(async () => "/home/me/proj");
     const createWorkspace = vi.fn(async () => ({ ...pane, shellInput: false }));
@@ -44,6 +72,22 @@ describe("createHerdrChat", () => {
     expect(createWorkspace).not.toHaveBeenCalled();
     const open = vi.fn(async () => { throw new Error("Folder unavailable"); });
     await expect(createHerdrChat({ workspaces: { open } } as never, async () => ({}), "/gone", createWorkspace)).rejects.toThrow(/Opened a new terminal in proj, but couldn't attach a chat to it: Folder unavailable/);
+  });
+});
+
+describe("openHerdrTerminal", () => {
+  it("opens the folder's workspace and runs the attach command in a terminal without a shell", async () => {
+    const create = vi.fn(async () => ({}));
+    const open = vi.fn(async () => ({ id: "ws-1", terminals: { create } }));
+    const id = await openHerdrTerminal({ workspaces: { open } } as never, { cwd: "/repo", attach: { command: "/bin/herdr", args: ["agent", "attach", "x"] }, name: "Herdr: x" });
+    expect(id).toBe("ws-1");
+    expect(create).toHaveBeenCalledExactlyOnceWith({ name: "Herdr: x", command: "/bin/herdr", args: ["agent", "attach", "x"] });
+  });
+  it("refuses a pane with no attach command or no folder before touching Paseo", async () => {
+    const open = vi.fn();
+    await expect(openHerdrTerminal({ workspaces: { open } } as never, { cwd: "/repo", attach: null, name: "x" })).rejects.toThrow(/can't be opened as a terminal/);
+    await expect(openHerdrTerminal({ workspaces: { open } } as never, { cwd: null, attach: { command: "h", args: [] }, name: "x" })).rejects.toThrow(/can't be opened as a terminal/);
+    expect(open).not.toHaveBeenCalled();
   });
 });
 

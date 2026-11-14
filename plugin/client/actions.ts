@@ -1,7 +1,10 @@
 import type { PluginClientContext } from "@getpaseo/plugin/client";
-import { errorMessage, HERDR_SHELL_PROVIDER, needsHomeExpansion, validateFolder } from "./helpers.js";
+import { errorMessage, HERDR_SHELL_PROVIDER, needsHomeExpansion, SHELL_INPUT_SETTINGS_PATH, validateFolder } from "./helpers.js";
 import { HERDR_BIND_OPTION, NATIVE_DEFAULT_MODEL } from "../shared/model.js";
 import type { OverviewAgent } from "../shared/rpc.js";
+
+/** A command a Paseo terminal runs without a shell. */
+export interface AttachSpec { command: string; args: string[] }
 
 type Paseo = PluginClientContext["paseo"];
 type Ready = (input: { terminalId: string }) => Promise<unknown>;
@@ -16,10 +19,30 @@ export interface NewPane {
   cwd: string | null;
   /** The plugin setting that lets a chat type into a plain shell is on. */
   shellInput: boolean;
+  /** `herdr terminal attach <terminal id>` for the pane; absent or null when the daemon can't offer it. */
+  attach?: AttachSpec | null;
 }
 
-/** `agentId` is the chat to open; null with a `note` when the pane was opened but no chat could be bound to it. */
-export type NewAgentResult = { agentId: string; note: null } | { agentId: null; note: string };
+/**
+ * What "New agent" did with the pane Herdr opened: `agentId` is a chat bound to it to open; `workspaceId` is the Paseo
+ * workspace now holding a terminal attached to it (no chat is possible while shell input is off); a bare `note` means neither
+ * could be done and the user needs to be told.
+ */
+export type NewAgentResult =
+  | { agentId: string; note: null }
+  | { agentId: null; workspaceId: string; note: null }
+  | { agentId: null; note: string };
+
+/**
+ * Open a Herdr pane as a Paseo terminal in the workspace for `cwd`: a terminal running the herdr attach command with no
+ * shell. Returns the Paseo workspace to navigate to.
+ */
+export async function openHerdrTerminal(paseo: Paseo, target: { cwd: string | null; attach: AttachSpec | null | undefined; name: string }): Promise<string> {
+  if (!target.attach || !target.cwd) throw new Error("This pane can't be opened as a terminal here: the daemon could not find the herdr command, or the pane has no folder");
+  const workspace = await paseo.workspaces.open(target.cwd);
+  await workspace.terminals.create({ name: target.name, command: target.attach.command, args: target.attach.args });
+  return workspace.id;
+}
 
 /**
  * One-tap "open chat" for a running pane: create a chat in its folder's workspace that binds the existing pane (no process
@@ -43,14 +66,23 @@ export async function bindHerdrChat(paseo: Paseo, ready: Ready, agent: BindTarge
 
 /**
  * "New agent" for a pane Herdr just opened: bind a chat to it. Never starts a process: the pane stays an empty shell. Without
- * the shell setting a chat can't type into it, so the pane is left for the user to start an agent in, and `note` says so.
+ * the shell setting a chat can't type into it, so the pane opens as a Paseo terminal instead (the user types in it there); only
+ * when that is impossible does `note` say what to do.
  */
 export async function bindNewPane(paseo: Paseo, ready: Ready, pane: NewPane, fallbackCwd: string | null, title: string): Promise<NewAgentResult> {
   const cwd = pane.cwd ?? fallbackCwd;
   if (!pane.shellInput || !cwd) {
+    // No chat can type into the shell, so show the pane itself as a Paseo terminal the user can type in.
+    if (cwd && pane.attach) {
+      try {
+        return { agentId: null, workspaceId: await openHerdrTerminal(paseo, { cwd, attach: pane.attach, name: `Herdr: ${title}` }), note: null };
+      } catch (error) {
+        throw new Error(`Opened a new terminal in ${title}, but couldn't open it here: ${errorMessage(error)}`);
+      }
+    }
     return {
       agentId: null,
-      note: `Opened a new terminal in ${title}. Start an agent in it and it will appear here. A chat can type into a plain shell only when "Allow shell input" is on in the Herdr plugin settings.`,
+      note: `Opened a new terminal in ${title}. Open it from the list below with "Open existing terminal". A chat can type into a plain shell only when "Allow shell input" is on (${SHELL_INPUT_SETTINGS_PATH}).`,
     };
   }
   try {

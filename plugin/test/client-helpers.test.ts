@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { shellGateEpoch } from "../shared/settings.js";
-import { withShellSwitch, archiveDuplicatesLabel, archiveFailureMessage, companionBanner, duplicateArchiveSkippedMessage, duplicateChatsToArchive, freshDuplicatesToArchive, folderFieldValue, needsHomeExpansion, agentLabel, describeTarget, EXISTING_AGENTS_LIMIT, paneText, pathTail, pickableAgents, placeText, plainState, plainRowTitle, plainPaneBindable, statusLabel, statusTone, tabText, validateFolder, workspaceText } from "../client/helpers.js";
+import { withShellSwitch, archiveDuplicatesLabel, archiveFailureMessage, companionBanner, duplicateArchiveSkippedMessage, duplicateChatsToArchive, freshDuplicatesToArchive, folderFieldValue, needsHomeExpansion, agentLabel, describeTarget, NOTICE_TOAST_MS, DEFAULT_TOAST_MS, PICKER_LIMIT, pickerItems, pickerPlace, rowActions, paneText, pathTail, placeText, plainState, plainRowTitle, plainPaneBindable, statusLabel, statusTone, tabText, validateFolder, workspaceText } from "../client/helpers.js";
 
 describe("withShellSwitch", () => {
   const base = { herdrSession: "s", allowShell: false, allowShellEpoch: 0 };
@@ -198,16 +198,77 @@ describe("Herdr names", () => {
   });
 });
 
-describe("pickableAgents", () => {
-  const entry = (id: string, extra: object = {}) => ({ agent: { id, title: id, provider: "claude", cwd: "/a", updatedAt: "2026-11-01T00:00:00Z", archivedAt: null, ...extra } });
-  it("drops archived agents, lists the newest first and filters on title, folder and provider", () => {
-    const entries = [entry("old", { updatedAt: "2026-10-01T00:00:00Z" }), entry("new", { updatedAt: "2026-11-02T00:00:00Z", cwd: "/work/api" }), entry("gone", { archivedAt: "2026-11-01" }), entry("t", { title: null, provider: "herdr-omp" })];
-    expect(pickableAgents(entries, "").map((a) => a.id)).toEqual(["new", "t", "old"]);
-    expect(pickableAgents(entries, " API ").map((a) => a.id)).toEqual(["new"]);
-    expect(pickableAgents(entries, "herdr").map((a) => [a.id, a.title])).toEqual([["t", "Untitled"]]);
+import { overviewAgentSchema } from "../shared/rpc.js";
+import type { FlatAgent } from "../client/sort.js";
+
+const flat = (extra: object = {}, id = "t1", where: Partial<Pick<FlatAgent, "workspace" | "tab" | "tabPanes">> = {}): FlatAgent => ({
+  agent: overviewAgentSchema.parse({
+    terminalId: id, paneId: `w1:${id}`, name: null, title: id, kind: "omp", harness: "OMP", provider: "herdr-omp", status: "idle", cwd: "/repo",
+    paseoAgentId: null, attachCommand: "herdr agent attach x", attach: { command: "/bin/herdr", args: ["agent", "attach", "x"] }, inputReady: null, canRestart: false, paneNumber: 1, ...extra,
+  }),
+  workspace: { id: "w1", number: 1, label: "alpha-api", cwd: "/repo" },
+  tab: { id: "tab1", number: 1, label: "tests" },
+  tabPanes: 1,
+  ...where,
+});
+const plainPane = (extra: object = {}, id = "sh1", where: Partial<Pick<FlatAgent, "workspace" | "tab" | "tabPanes">> = {}) =>
+  flat({ kind: null, harness: null, provider: "herdr-generic", status: "unknown", title: null, plain: true, isShell: true, program: "zsh", ...extra }, id, where);
+
+describe("pickerItems", () => {
+  const items = [
+    flat({ title: "Fix tests" }, "a1"),
+    flat({ title: "Refactor" }, "a2", { workspace: { id: "w2", number: 2, label: "gamma-ops", cwd: "/ops" }, tab: { id: "tab2", number: 2, label: "deploy" } }),
+    plainPane({ program: "vim", isShell: false }, "p1"),
+    plainPane({ paneLabel: "dev shell" }, "p2", { tabPanes: 2 }),
+  ];
+  it("lists only panes with a detected agent for the agent picker, and only panes with none for the terminal picker", () => {
+    expect(pickerItems(items, "agent", "").map((i) => i.agent.terminalId)).toEqual(["a1", "a2"]);
+    expect(pickerItems(items, "terminal", "").map((i) => i.agent.terminalId)).toEqual(["p1", "p2"]);
   });
-  it("cuts the list to the limit", () => {
-    const many = Array.from({ length: EXISTING_AGENTS_LIMIT + 5 }, (_, i) => entry(`a${i}`));
-    expect(pickableAgents(many, "")).toHaveLength(EXISTING_AGENTS_LIMIT);
+  it("filters on workspace, tab and pane names as well as title, program and folder, ignoring case and padding", () => {
+    expect(pickerItems(items, "agent", " GAMMA ").map((i) => i.agent.terminalId)).toEqual(["a2"]);
+    expect(pickerItems(items, "agent", "deploy").map((i) => i.agent.terminalId)).toEqual(["a2"]);
+    expect(pickerItems(items, "agent", "fix").map((i) => i.agent.terminalId)).toEqual(["a1"]);
+    expect(pickerItems(items, "terminal", "dev shell").map((i) => i.agent.terminalId)).toEqual(["p2"]);
+    expect(pickerItems(items, "terminal", "vim").map((i) => i.agent.terminalId)).toEqual(["p1"]);
+    expect(pickerItems(items, "terminal", "/repo")).toHaveLength(2);
+    expect(pickerItems(items, "terminal", "nothing like it")).toEqual([]);
+  });
+  it("never lists anything that is not in the Herdr overview it is given, and cuts the list to the limit", () => {
+    expect(pickerItems([], "agent", "")).toEqual([]);
+    const many = Array.from({ length: PICKER_LIMIT + 5 }, (_, i) => flat({}, `m${i}`));
+    expect(pickerItems(many, "agent", "")).toHaveLength(PICKER_LIMIT);
+  });
+  it("names the place with Herdr's own workspace, tab and pane names", () => {
+    expect(pickerPlace(items[3]!)).toBe("alpha-api › tests › dev shell");
+    expect(pickerPlace(items[0]!)).toBe("alpha-api › tests");
+  });
+});
+
+describe("rowActions", () => {
+  const go = { shellInput: false, canNavigate: true };
+  it("gives an agent with a chat Open existing agent, and one without a chat Open agent (bind), plus Open in terminal", () => {
+    expect(rowActions(flat({ paseoAgentId: "chat" }).agent, go)).toEqual({ openAgent: "open", openTerminal: true, newAgentHere: false, restart: false, turnOnShell: false });
+    expect(rowActions(flat().agent, go)).toMatchObject({ openAgent: "bind", newAgentHere: false, turnOnShell: false });
+  });
+  it("gives a plain terminal Open existing terminal and no chat button", () => {
+    expect(rowActions(plainPane({ program: "vim", isShell: false }).agent, go)).toEqual({ openAgent: null, openTerminal: true, newAgentHere: false, restart: false, turnOnShell: false });
+  });
+  it("offers a shell the switch while shell input is off, and New agent in this pane once it is on", () => {
+    expect(rowActions(plainPane().agent, go)).toMatchObject({ newAgentHere: false, turnOnShell: true, openTerminal: true });
+    expect(rowActions(plainPane().agent, { ...go, shellInput: true })).toMatchObject({ newAgentHere: true, turnOnShell: false });
+    expect(rowActions(plainPane({ program: "vim", isShell: false }).agent, { ...go, shellInput: true }).newAgentHere).toBe(false);
+  });
+  it("offers nothing that needs navigation without it, nor a terminal without an attach command, and shows restart when possible", () => {
+    expect(rowActions(flat({ paseoAgentId: "c" }).agent, { ...go, canNavigate: false })).toMatchObject({ openAgent: null, openTerminal: false });
+    expect(rowActions(flat({ attach: null }).agent, go).openTerminal).toBe(false);
+    expect(rowActions(flat({ canRestart: true }).agent, go).restart).toBe(true);
+  });
+});
+
+describe("shell notice toast", () => {
+  it("is three times the default toast length once the dialog is turned off", () => {
+    expect(NOTICE_TOAST_MS).toBe(DEFAULT_TOAST_MS * 3);
+    expect(NOTICE_TOAST_MS).toBe(6600);
   });
 });

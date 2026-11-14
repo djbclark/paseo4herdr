@@ -167,35 +167,83 @@ export function agentLabel(agent: { title: string | null; name: string | null; k
   return cleanTitle(agent.title) ?? agent.name ?? agent.kind ?? agent.program ?? agent.terminalId;
 }
 
-/** One existing Paseo agent in the "Open existing agent" list. */
-export interface ExistingAgent {
-  id: string;
-  title: string;
-  provider: string;
-  cwd: string;
-  updatedAt: string;
-}
+/** The Herdr screen's two pickers: panes with a detected agent, and panes with none. */
+export type PickerKind = "agent" | "terminal";
 
-/** The part of a Paseo agent-list entry the picker reads. */
-interface ListedAgent {
-  agent: { id: string; title?: string | null; provider: string; cwd: string; updatedAt: string; archivedAt?: string | null };
-}
-
-export const EXISTING_AGENTS_LIMIT = 50;
+/** Most rows a picker lists at once; the filter narrows further. */
+export const PICKER_LIMIT = 50;
 
 /**
- * Paseo's agents for the "Open existing agent" picker: archived ones left out, newest first, narrowed by a case-insensitive
- * match of `query` against title, folder and provider, and cut to {@link EXISTING_AGENTS_LIMIT}.
+ * Panes for the "Open existing agent" / "Open existing terminal" pickers. The source is Herdr's own overview, so nothing that
+ * isn't a Herdr pane can appear: an agent picker lists panes with a detected agent (`plain` false), a terminal picker lists
+ * panes with none. `query` is a case-insensitive match against workspace, tab, pane, title, harness, program and folder names.
+ * Order is Herdr's: workspace, tab, pane.
  */
-export function pickableAgents(entries: readonly ListedAgent[], query: string): ExistingAgent[] {
+export function pickerItems(items: readonly FlatAgent[], kind: PickerKind, query: string): FlatAgent[] {
   const needle = query.trim().toLowerCase();
-  const time = (iso: string) => Date.parse(iso) || 0;
-  return entries
-    .filter(({ agent }) => !agent.archivedAt)
-    .map(({ agent }): ExistingAgent => ({ id: agent.id, title: agent.title?.trim() || "Untitled", provider: agent.provider, cwd: agent.cwd, updatedAt: agent.updatedAt }))
-    .filter((agent) => !needle || [agent.title, agent.cwd, agent.provider].some((field) => field.toLowerCase().includes(needle)))
-    .sort((a, b) => time(b.updatedAt) - time(a.updatedAt) || a.id.localeCompare(b.id))
-    .slice(0, EXISTING_AGENTS_LIMIT);
+  return items
+    .filter(({ agent }) => agent.plain === (kind === "terminal"))
+    .filter((item) => !needle || pickerHaystack(item).some((field) => field.toLowerCase().includes(needle)))
+    .slice(0, PICKER_LIMIT);
+}
+
+function pickerHaystack(item: FlatAgent): string[] {
+  const { agent } = item;
+  return [
+    workspaceText(item.workspace),
+    tabText(item.tab),
+    paneText(agent, item.tabPanes),
+    agentLabel(agent),
+    agent.harness ?? "",
+    agent.kind ?? "",
+    agent.program ?? "",
+    agent.cwd ?? "",
+    agent.paneId,
+  ];
+}
+
+/** Text under a picker option's name: where the pane is, in Herdr's own names. */
+export function pickerPlace(item: FlatAgent): string {
+  return placeText(item, false);
+}
+
+/** Toast length a notice used before it moved into a dialog; the screen shows it at {@link NOTICE_TOAST_MS} after "Don't show this again". */
+export const DEFAULT_TOAST_MS = 2200;
+export const NOTICE_TOAST_MS = DEFAULT_TOAST_MS * 3;
+
+/** One line that says what turning shell input on does, shown next to the "Turn on shell input" action. */
+export const SHELL_INPUT_EXPLANATION =
+  "Shell input lets a Paseo chat type your messages into this shell as commands. It is off by default; turning it on applies to this whole host.";
+
+/** The plain-text route to the same switch, for anyone who prefers settings. */
+export const SHELL_INPUT_SETTINGS_PATH = "Settings > Plugins > herdr-harness > Allow shell input";
+
+/** What a pane's row offers. Pure so the tests can pin it: the row only renders these. */
+export interface RowActions {
+  /** Open the pane's Paseo chat (or bind one); never offered for a pane with no agent. */
+  openAgent: "open" | "bind" | null;
+  /** Open the pane as a Paseo terminal. Agent panes call it "Open in terminal"; plain panes "Open existing terminal". */
+  openTerminal: boolean;
+  newAgentHere: boolean;
+  restart: boolean;
+  /** A shell pane that can't take a chat because shell input is off: offer the switch. */
+  turnOnShell: boolean;
+}
+
+export function rowActions(
+  agent: { plain: boolean; isShell: boolean; paseoAgentId: string | null; provider: string | null; cwd: string | null; attach: unknown; canRestart: boolean },
+  opts: { shellInput: boolean; canNavigate: boolean },
+): RowActions {
+  const { canNavigate, shellInput } = opts;
+  const hasCwd = Boolean(agent.cwd);
+  return {
+    openAgent: !canNavigate ? null : agent.paseoAgentId ? "open" : !agent.plain && agent.provider && hasCwd ? "bind" : null,
+    openTerminal: Boolean(canNavigate && agent.attach && hasCwd),
+    // An agent pane without a chat is bound by "Open agent"; "New agent in this pane" is for a real shell with no chat yet.
+    newAgentHere: Boolean(canNavigate && agent.plain && !agent.paseoAgentId && agent.provider && hasCwd && plainPaneBindable(agent, shellInput)),
+    restart: agent.canRestart,
+    turnOnShell: agent.plain && agent.isShell && !shellInput,
+  };
 }
 
 /** The value a picked suggestion puts in the field: the path plus "/" so the user can keep drilling down. */

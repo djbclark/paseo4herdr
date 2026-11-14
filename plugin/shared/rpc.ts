@@ -295,6 +295,9 @@ export const herdrDuplicatesArchiveRpc = defineRpc({
   }),
 });
 
+/** A command a Paseo terminal can run without a shell. */
+export const attachSpecSchema = z.object({ command: z.string(), args: z.array(z.string()) });
+
 export const herdrWorkspaceCreateRpc = defineRpc({
   name: "herdr.workspace.create",
   input: z.object({
@@ -309,6 +312,8 @@ export const herdrWorkspaceCreateRpc = defineRpc({
     paneId: z.string().optional(),
     terminalId: z.string().optional(),
     shellInput: z.boolean().optional(),
+    /** `herdr terminal attach <terminal id>` for the first pane, to open it as a Paseo terminal; null when the daemon can't run `herdr` that way. */
+    attach: attachSpecSchema.nullable().optional(),
   }),
 });
 
@@ -328,6 +333,8 @@ export const herdrPaneCreateRpc = defineRpc({
     /** The new pane's folder as Herdr reports it; null when it doesn't. */
     cwd: z.string().nullable(),
     shellInput: z.boolean(),
+    /** `herdr terminal attach <terminal id>` for the new pane, so the client can open it as a Paseo terminal; null when unavailable. */
+    attach: attachSpecSchema.nullable().optional(),
   }),
 });
 

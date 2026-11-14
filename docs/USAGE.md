@@ -14,37 +14,44 @@ The screen shows, top to bottom:
 | Workspace cards | One card per Herdr workspace, titled with the workspace's name, with its folder (the first pane's working directory) and every terminal in it, agents and plain shells alike. A workspace with none shows "No terminals in this workspace." |
 | Terminal rows | One row per Herdr pane in the workspace's tabs. See below. |
 | **New agent in this workspace** | At the bottom of a workspace card that has a folder. Creates a new pane in that Herdr workspace (a shell, nothing is launched) and binds a Paseo chat to it. See [Starting a chat](#importing-an-agent-or-starting-one). |
-| **Open existing agent** | At the top. Lists existing Paseo chats and opens the one you pick. It does not move a chat into a Herdr pane. |
-| **Start a chat** | A folder field plus **New agent**, for a folder that has no workspace yet. Hidden when Herdr is unreachable. |
+| **Open existing agent** | At the top. A picker of Herdr agents only (panes with a detected agent), filterable by text; each entry shows its workspace, tab and pane names. Picking one opens its chat, or attaches a chat to the running agent first when it has none. |
+| **Open existing terminal** | At the top. A picker of Herdr terminals only (panes with no agent), filterable the same way. Picking one opens it as a Paseo terminal running `herdr terminal attach`. |
+| **Start a chat** | A folder field plus **New agent**, for a folder that has no workspace yet. It opens a new Herdr workspace in that folder and works on its first pane, like **New agent in this workspace**. Hidden when Herdr is unreachable. |
 | **New workspace** | A folder field, an optional label, and **Create workspace**. Creates an empty Herdr workspace (not focused in Herdr); the label defaults to the folder's name. |
 | **Connection** | The effective Herdr target (socket, session, whether auto-start is on), the Herdr version when connected, and "(auto-started by Paseo)" when Paseo started the Herdr server. |
 
 ### Agent rows
 
-Each row shows the agent's name, its status (a symbol and a word) and its harness. The raw pane id, for example `w2:p1`, is in the **⋯** sheet. The name is the terminal title with the prompt glyph removed, else the Herdr agent name.
+Each row shows the agent's name, its status (a symbol and a word) and its harness. Under it the row lists its facts, the raw pane id (for example `w2:p1`) and terminal id among them. The name is the terminal title with the prompt glyph removed, else the Herdr agent name.
 
-Each row also shows where the agent is (`api-server › tests`, using the workspace and tab names; the workspace part is dropped inside a workspace card). A pane is named only when it is needed: its Herdr pane name, or `pane 2` when the tab holds several panes and a line of times: last activity, how long it has been in its state, whether its prompt cache is estimated to be cold (Anthropic models only, always marked "est."), when the session started, and the model. A time the plugin can't know is left out. Time in state counts from when the plugin first saw the agent, so right after a daemon restart it reads `≥ 52m`. **⋯** shows the exact times and where each came from.
+Each row also shows where the agent is (`api-server › tests`, using the workspace and tab names; the workspace part is dropped inside a workspace card). A pane is named only when it is needed: its Herdr pane name, or `pane 2` when the tab holds several panes and a line of times: last activity, how long it has been in its state, whether its prompt cache is estimated to be cold (Anthropic models only, always marked "est."), when the session started, and the model. A time the plugin can't know is left out. Time in state counts from when the plugin first saw the agent, so right after a daemon restart it reads `≥ 52m`. The facts under the row show the exact times, where each came from, the model, the folder and the attach command with a **Copy** button.
 
 The row above the cards sets the order: **Sort** picks the field (Herdr order by default, last activity, state changed, cache cold at, session started, status, title, harness, model, workspace, tab, pane, folder, has chat, input ready, duplicates), the arrow reverses it, and **Grouped / Flat** switches between one card per workspace and one list. Picking a field resets the direction to its natural one (newest first for times). Agents with no value for the field go last. The choice is saved per host.
 
 Status is Herdr's own: **Idle**, **Working**, **Blocked** (waiting for a decision), **Done** or **Unknown**.
 
-A pane with no agent (a plain shell, vim, a build) is listed too. Its state reads **Shell** or the program's name, never an agent status, and it has no times, no cache estimate and no transcript. It sorts after every agent in the status sort. Its **⋯** sheet has **Open terminal**, which opens a Paseo terminal running `herdr terminal attach`.
+A pane with no agent (a plain shell, vim, a build) is listed too. Its state reads **Shell** or the program's name, never an agent status, and it has no times, no cache estimate and no transcript. It sorts after every agent in the status sort. Its row has **Open existing terminal**, which opens a Paseo terminal running `herdr terminal attach`. A shell with shell input off also shows **Turn on shell input** (see [Shell input](#shell-input-is-off-by-default)).
 
-Tap the row to open its chat:
+Every action is a button in the row; nothing sits behind a menu.
 
-- If the agent already has a Paseo chat, that chat opens. When several live chats are bound to one agent, the newest owns the row.
-- If not, the row says "No chat yet: tap to open one." and tapping creates a chat attached to the running agent (no new process) and loads its earlier conversation.
-- If creating the chat fails, the row shows "Couldn't open a chat: …" and an **Import it instead** button. It opens the folder's workspace; use **⋯ → Import session** there and pick the agent by the name and pane shown in the toast.
-- "No Paseo provider handles this agent kind." means Herdr reports the agent as something other than OMP. Only OMP agents are supported.
+| Button | On | What it does |
+|---|---|---|
+| **Open existing agent** | An agent that has a Paseo chat | Opens that chat. When several live chats are bound to one agent, the newest owns the row. |
+| **Open agent** | An agent with no chat yet | Creates a chat attached to the running agent (no new process), loads its earlier conversation, and opens it. Tapping the row's text does the same. |
+| **Open existing terminal** | A pane with no agent | Opens a Paseo terminal named `Herdr: <name>` in the pane's folder, running `herdr terminal attach <terminal id>`. |
+| **Open in terminal** | An agent | Opens a Paseo terminal running `herdr agent attach`. Shown only when the daemon can find `herdr` on its `PATH` and the `herdr` CLI would reach the same socket by session name; a custom socket path that the session name wouldn't reach hides it. |
+| **New agent in this pane** | A shell with no chat, shell input on | Binds a chat to that shell. |
+| **Restart agent** / **Restart to enable input** | A restartable agent | The restart described in [Read-only agents](#read-only-agents-and-restart-to-enable-input). It fails with a message unless the agent is idle or done. |
+| **Archive N duplicate chats** | An agent with extra chats bound to it | Archives them; the row's own chat is kept. |
+| **Import it instead** | After "Couldn't open a chat" | Opens the folder's workspace; use Paseo's **Import session** there and pick the agent by the name and pane shown in the toast. |
+| **Copy** | Every row | Copies the attach command to run in any terminal on the same computer. |
 
-The **⋯** button opens a sheet with:
+- "No Paseo provider handles this agent kind." means Herdr reports the agent as something other than OMP. Only OMP agents have full support.
+- If creating the chat fails, the row shows "Couldn't open a chat: …".
 
-| Action | What it does |
-|---|---|
-| **Open in terminal** | Opens a Paseo terminal named `Herdr: <agent>` in the agent's folder, running `herdr agent attach`. Shown only when the daemon can find `herdr` on its `PATH` and the `herdr` CLI would reach the same socket by session name; a custom socket path that the session name wouldn't reach hides it. |
-| **Restart agent** | The same restart as **Restart to enable input**, offered for any restartable agent; see [Read-only agents](#read-only-agents-and-restart-to-enable-input). It fails with a message unless the agent is idle or done. |
-| Attach command and **Copy** | The `herdr agent attach <name>` command (with `--session <name>` for a named session) to run in any terminal on the same computer. |
+## Only Herdr items are listed
+
+The screen, both pickers and the folder suggestions show Herdr's own workspaces, tabs and panes. Paseo's workspaces, tabs and chats that are not bound to a Herdr pane are never listed or offered. The two creation forms, **Start a chat** and **New workspace**, make Herdr workspaces; neither makes a plain Paseo workspace or chat. (Herdr chats still appear in Paseo's own sidebar, which a plugin can't hide.)
 
 ## Importing an agent or starting one
 
@@ -54,9 +61,18 @@ The **⋯** button opens a sheet with:
 
 1. **New agent in this pane** (on a row) binds a chat to that existing pane.
 2. **New agent in this workspace** (on a workspace card) first creates a new tab with one shell pane in that Herdr workspace (not focused in Herdr), then binds a chat to it.
-3. **Start a chat** (folder field) finds a workspace for that folder, or creates one, and does the same.
+3. **Start a chat** (folder field) opens a new Herdr workspace in that folder and does the same on its first pane.
 
-A new pane is a plain shell. Chatting with a plain shell needs the shell setting on; with it off the pane is still created and a toast says so, with no chat bound. Whatever should run in the pane, you start yourself in the terminal.
+A new pane is a plain shell. Chatting with a plain shell needs the shell setting on. With it off (the default) the new pane opens as a Paseo terminal and the screen goes straight to it, so you can type in it and start whatever should run there. If the daemon can't open the terminal (it can't find `herdr`), a dialog explains and offers **OK** and **Don't show this again**; after the second, the same text appears as a toast three times as long. That choice is the host-scoped plugin setting `herdr-overview-notices`.
+
+### Shell input is off by default
+
+Shell input lets a Paseo chat type your messages into a plain shell as commands, so it is off until you turn it on. Turn it on in either of two ways:
+
+- Tap **Turn on shell input** on a shell row or in the new-terminal dialog. It saves the same plugin setting as the next route; the explanation sits next to the button.
+- Open **Settings > Plugins > herdr-harness > Allow shell input** and switch it on.
+
+Nothing turns it on for you. Each move of the switch stores a new enable epoch, so chats that opted in earlier stay disarmed; see [Shell input](#shell-input-opt-in-off-by-default) below for the whole model.
 
 ### Folder fields
 
@@ -172,7 +188,7 @@ A chat remembers the Herdr session it was created on. After you change settings 
 
 By default a plain shell pane is refused. A conversation can be opted into **shell input**, which makes what you type in Paseo run as commands in that shell. Treat it like giving the chat a terminal.
 
-- **Plugin setting (the global gate).** Shell input works only while the plugin setting **Allow shell input** is on. It is off by default and is changed in the Herdr plugin's settings screen. The plugin's own RPCs and bind option never change it, but Paseo's generic settings API can: treat the gate as a guard against an accidental opt-in, not against a hostile Paseo client. While it is off every conversation is treated as if it had not opted in, persisted ones included: opening one clears its flag and freezes it, an open one freezes at its next check, and `allowShell` at bind and `herdr.chat.allow-shell {enabled: true}` are refused. Each time the settings screen moves the switch, on or off, it stores a new **enable epoch** in the same settings document; a conversation records the epoch it opted in under and counts as opted in only while the setting still holds that epoch. So turning the setting off and on again re-arms nothing, closed conversations included: opt in again. A later write that only flips `allowShell` back to true (a script using Paseo's generic settings API) keeps the epoch the off-save stored, which no conversation holds, so it re-arms nothing either. Restoring a whole settings file saved while the switch was on is different: it brings back that epoch, and with it the opt-in of every conversation made under it that stayed closed while the switch was off. A setting that **cannot be read right now** (a failed or invalid read, or not read yet) is not "off": prompts are refused with a message saying the settings could not be read, the status shows unknown, and no conversation's opt-in is forgotten; when the read works again the same conversation types again. Only a successful read of a setting that is off or holds another epoch clears the opt-in. Migration: a persisted flag with no epoch (stored before epochs existed) is treated as off and cleared at the next open, and a setting that is on without an epoch (not written by the settings screen switch) keeps the gate closed; turn the switch off and on once in the settings screen.
+- **Plugin setting (the global gate).** Shell input works only while the plugin setting **Allow shell input** is on. It is off by default. Switch it on at Settings > Plugins > herdr-harness > Allow shell input, or with **Turn on shell input** on the Herdr screen (the same setting, one tap, never done for you). The plugin's own RPCs and bind option never change it, but Paseo's generic settings API can: treat the gate as a guard against an accidental opt-in, not against a hostile Paseo client. While it is off every conversation is treated as if it had not opted in, persisted ones included: opening one clears its flag and freezes it, an open one freezes at its next check, and `allowShell` at bind and `herdr.chat.allow-shell {enabled: true}` are refused. Each time the settings screen moves the switch, on or off, it stores a new **enable epoch** in the same settings document; a conversation records the epoch it opted in under and counts as opted in only while the setting still holds that epoch. So turning the setting off and on again re-arms nothing, closed conversations included: opt in again. A later write that only flips `allowShell` back to true (a script using Paseo's generic settings API) keeps the epoch the off-save stored, which no conversation holds, so it re-arms nothing either. Restoring a whole settings file saved while the switch was on is different: it brings back that epoch, and with it the opt-in of every conversation made under it that stayed closed while the switch was off. A setting that **cannot be read right now** (a failed or invalid read, or not read yet) is not "off": prompts are refused with a message saying the settings could not be read, the status shows unknown, and no conversation's opt-in is forgotten; when the read works again the same conversation types again. Only a successful read of a setting that is off or holds another epoch clears the opt-in. Migration: a persisted flag with no epoch (stored before epochs existed) is treated as off and cleared at the next open, and a setting that is on without an epoch (not written by the settings screen switch) keeps the gate closed; turn the switch off and on once in the settings screen.
 - **Turn it on at bind time** by passing `allowShell: true` in the `herdrBind` provider option together with the shell pane's `terminalId`. Herdr must list the pane without a detected agent, and the shell must be at an idle prompt when the chat opens; a busy or non-shell foreground at open freezes the conversation. A pane where Herdr detects an agent is refused.
 - **Turn it on or off later** with the management RPC `herdr.chat.allow-shell` with `{ "agentId": "<Paseo agent id>", "enabled": true | false }`. On reaches only a conversation that is open in the plugin and records the current enable epoch. Off is a kill switch: the conversation goes read-only at once, a prompt that is still being delivered is stopped before anything is typed (and if Enter has not been pressed yet, it is not pressed: the text stays on the command line), and nothing more is typed. Off for an agent id that matches no open conversation is an error saying nothing was stopped now (a conversation that is open but has no Paseo agent id in its environment cannot be reached this way; turn off **Allow shell input** instead); for a closed conversation the plugin remembers the revocation until it restarts and clears the flag at the next open (Paseo owns the stored flag; the plugin setting is the durable switch). On is refused while the conversation is open and bound to an agent. The flag is saved with the chat. The Herdr screen has no control for it: this is RPC only.
 - **What happens.** The notice "Prompt text runs as shell commands." shows when the chat opens and with every prompt. A prompt must be one line of plain text (no newline or control character) of at most 1000 UTF-8 bytes; Paseo first clears the shell's command line (Ctrl+E, Ctrl+U), then types the text and presses Enter. It is accepted only while the shell itself holds the foreground alone; while a command runs, prompts are refused and **Stop** sends Ctrl+C. The turn ends when the shell has its prompt back. Delivered prompts show as your messages in the conversation. A prompt that starts an interactive program (`ssh`, `python`, `vim`, a nested shell) keeps the turn open until that program exits; Ctrl+C from Stop does not exit most of them.
@@ -183,6 +199,6 @@ By default a plain shell pane is refused. A conversation can be opted into **she
 ## Known limits
 
 - Replies appear a message at a time, not token by token.
-- Only agents Herdr lists as agents are supported. OMP has full support; any other detected agent opens as a "Generic" chat: you see the pane's screen as one updating message, prompts you send appear above it, and approvals, model changes, restart and forks are not available. Plain shell panes don't appear and are refused unless you opt a conversation into shell input (next section).
+- Only agents Herdr lists as agents are supported. OMP has full support; any other detected agent opens as a "Generic" chat: you see the pane's screen as one updating message, prompts you send appear above it, and approvals, model changes, restart and forks are not available. Plain shell panes are listed, but a chat can type into one only if you opt a conversation into shell input (next section).
 - Only plain-text messages can be sent from Paseo.
 - If an agent disappears from Herdr, its chat goes read-only; a new chat is needed for any agent that replaces it.

@@ -91,10 +91,10 @@ describe("panes with no agent", () => {
     expect(rowTexts(program, "vim", NOW, { compact: true, grouped: true }).place).toBe("vim · one");
     expect(rowTexts(plain({ isShell: false, program: null }), "x", NOW, { compact: true, grouped: true }).place).toBe("Terminal · one");
   });
-  it("the details sheet names the program and never invents agent facts", () => {
+  it("the inline details name the program and never invents agent facts", () => {
     const lines = detailLines(plain(), NOW);
     expect(lines).toContainEqual({ label: "Running", value: "zsh (shell)" });
-    expect(lines.map((line) => line.label)).toEqual(["Running", "Pane", "Terminal"]);
+    expect(lines.map((line) => line.label)).toEqual(["Running", "Folder", "Pane", "Terminal"]);
   });
   it("sort: they rank after every agent state and have no cache or time to sort on", () => {
     const shell = plain();

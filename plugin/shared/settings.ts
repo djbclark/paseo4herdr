@@ -42,6 +42,20 @@ export function shellGateEpoch(values: { allowShell: boolean; allowShellEpoch: n
 export type ShellGate = number | null | "unknown";
 
 /**
+ * Notices the Herdr screen can stop showing as a dialog. Host-scoped like the view setting, so every device on this host
+ * shares the choice. `hideShellNotice`: the "new terminal opened, shell input is off" dialog was dismissed with "Don't show
+ * this again"; the screen then shows the same text as a longer toast.
+ */
+export const herdrNoticeSettings = defineSettings({
+  id: "herdr-overview-notices",
+  scope: "host",
+  version: 1,
+  schema: z.object({
+    hideShellNotice: z.boolean().default(false),
+  }),
+});
+
+/**
  * How the Herdr screen orders its agents. Host-scoped (the SDK has no per-device store), so every device that opens this
  * host shares one choice. `field` is validated by the client against its sort list, so an unknown value falls back to Herdr order.
  */

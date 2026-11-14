@@ -140,13 +140,20 @@ describe("herdr.pane.create", () => {
   const reply = () => fake.handle("tab.create", (req, s) => s.end(JSON.stringify({ id: req.id, result: { type: "tab_created", tab: { tab_id: "tab7", workspace_id: "w1" }, root_pane: { pane_id: "w1:p7", terminal_id: "t-7", workspace_id: "w1", tab_id: "tab7", cwd: "/proj" } } }) + "\n"));
   it("opens one new tab in the workspace, starts no program in it, and reports whether a chat may type into the shell", async () => {
     reply();
-    const open = setup({ shellEpoch: async () => 9 });
-    expect(await open.call(herdrPaneCreateRpc, { workspaceId: "w1" })).toEqual({ workspaceId: "w1", tabId: "tab7", paneId: "w1:p7", terminalId: "t-7", cwd: "/proj", shellInput: true });
+    const open = setup({ shellEpoch: async () => 9, findHerdr: async () => null });
+    expect(await open.call(herdrPaneCreateRpc, { workspaceId: "w1" })).toEqual({ workspaceId: "w1", tabId: "tab7", paneId: "w1:p7", terminalId: "t-7", cwd: "/proj", shellInput: true, attach: null });
     const [req] = fake.requestsFor("tab.create");
     expect(req!.params).toEqual({ workspace_id: "w1", focus: false });
     for (const method of ["agent.start", "pane.run", "pane.send_text", "pane.split"]) expect(fake.requestsFor(method)).toHaveLength(0);
     expect((await setup().call(herdrPaneCreateRpc, { workspaceId: "w1" })).shellInput).toBe(false);
     expect((await setup({ shellEpoch: async () => { throw new Error("unreadable"); } }).call(herdrPaneCreateRpc, { workspaceId: "w1" })).shellInput).toBe(false);
+  });
+  it("offers a shell-free `herdr terminal attach` for the new pane, so the client can open it as a Paseo terminal", async () => {
+    reply();
+    const env = { HOME: "/home/u", XDG_CONFIG_HOME: undefined, PATH: "/bin" };
+    const named = { readTarget: async () => ({ target: target("/home/u/.config/herdr/sessions/work/herdr.sock"), ompEnabled: true }), env, findHerdr: async () => "/usr/bin/herdr" };
+    const { call } = setup({ ...named, request: (_socket, method, params) => new HerdrClient(fake.socketPath).request(method, params ?? {}) });
+    expect((await call(herdrPaneCreateRpc, { workspaceId: "w1" })).attach).toEqual({ command: "/usr/bin/herdr", args: ["--session", "work", "terminal", "attach", "t-7"] });
   });
   it("propagates a readiness failure without asking Herdr, and does not retry a Herdr error", async () => {
     await expect(setup({ ensureReady: async () => { throw new Error("target down"); } }).call(herdrPaneCreateRpc, { workspaceId: "w1" })).rejects.toThrow("target down");

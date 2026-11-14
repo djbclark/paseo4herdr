@@ -341,14 +341,14 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
       return [];
     }
   };
-  /** Directories of Paseo's own workspaces, when the handler context exposes the Paseo API. */
-  const paseoFolders = async (paseo: PaseoApi | undefined): Promise<string[]> => {
-    try {
-      const result = await paseo?.workspaces?.list({ page: { limit: 100 } });
-      return (result?.entries ?? []).map((w) => w.workspaceDirectory ?? w.projectRootPath).filter((dir): dir is string => Boolean(dir) && isAbsolute(dir));
-    } catch {
-      return [];
-    }
+  /**
+   * Runs `herdr terminal attach <id>` without a shell, for a Paseo terminal. Null when `herdr` isn't on the daemon's PATH, or
+   * the target is a socket path the CLI wouldn't reach by session name (it would attach somewhere else).
+   */
+  const terminalAttachFor = async (target: HerdrTarget, terminalId: string): Promise<{ command: string; args: string[] } | null> => {
+    const reaches = resolveSocketPath({ session: target.herdrSession ?? undefined, env: { ...(deps.env ?? process.env), HERDR_SOCKET_PATH: undefined, HERDR_SESSION: undefined } }) === target.socketPath;
+    const herdrPath = reaches ? await (deps.findHerdr ?? (() => findOnPath("herdr", deps.env)))() : null;
+    return herdrPath ? { command: herdrPath, args: terminalAttachArgs(target.herdrSession, terminalId) } : null;
   };
 
   /** Read-only detection: does each harness process have its input endpoint? (one process_info per agent) */
@@ -404,12 +404,9 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
     return { target, ompEnabled };
   });
 
-  server.handle(herdrFoldersSuggestRpc, async ({ query }, { paseo }) => {
-    const [fromHerdr, fromPaseo] = await Promise.all([herdrFolders(), paseoFolders(paseo)]);
-    const known: FolderSuggestion[] = [
-      ...fromHerdr.map((path) => ({ path, source: "herdr" as const })),
-      ...fromPaseo.map((path) => ({ path, source: "paseo" as const })),
-    ];
+  // Only folders Herdr already uses are offered as known: Paseo's own workspaces are not Herdr's and never leak in here.
+  server.handle(herdrFoldersSuggestRpc, async ({ query }) => {
+    const known: FolderSuggestion[] = (await herdrFolders()).map((path) => ({ path, source: "herdr" as const }));
     return suggestFolders(query, home(), known);
   });
 
@@ -666,6 +663,7 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
     return {
       workspaceId: created.workspace.workspace_id, label: name, cwd: real,
       paneId: created.root_pane.pane_id, terminalId: created.root_pane.terminal_id, shellInput: await shellGateOpen(),
+      attach: await terminalAttachFor(target, created.root_pane.terminal_id),
     };
   });
 
@@ -681,6 +679,7 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
       terminalId: created.root_pane.terminal_id,
       cwd: created.root_pane.cwd ?? created.root_pane.foreground_cwd ?? null,
       shellInput: await shellGateOpen(),
+      attach: await terminalAttachFor(target, created.root_pane.terminal_id),
     };
   });
 

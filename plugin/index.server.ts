@@ -8,7 +8,7 @@ import { companionInstallStatus } from "./server/harness/omp/companion-install.j
 import { BoundSessions, OpenSessions } from "./server/bound-sessions.js";
 import { TargetReadiness, defaultTargetReadinessDeps, resolveTarget } from "./server/herdr/target.js";
 import { PaseoHost } from "./server/host.js";
-import { herdrSettings, herdrViewSettings } from "./shared/settings.js";
+import { herdrNoticeSettings, herdrSettings, herdrViewSettings } from "./shared/settings.js";
 import { createShellEpochCache } from "./server/shell-epoch-cache.js";
 
 /** How often the plugin samples Herdr to stamp agent state changes. */
@@ -17,6 +17,7 @@ const STATE_POLL_MS = 5000;
 export default function contribute(server: PluginServerContext) {
   const settings = server.registerSettings(herdrSettings);
   server.registerSettings(herdrViewSettings);
+  server.registerSettings(herdrNoticeSettings);
   const env = process.env;
   // Adapter routing (F3): one resolver over every registered adapter, shared by providers and RPCs.
   const resolver = createResolver(harnesses);

@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerManagementRpcs, type ManagementDeps } from "../server/rpc.js";
 import { expandHome, resolveQuery, splitParent, TYPED_LIMIT } from "../server/folders.js";
 import { herdrFoldersSuggestRpc, herdrWorkspaceCreateRpc, type HerdrTarget } from "../shared/rpc.js";
@@ -85,25 +85,24 @@ describe("herdr.folders.suggest", () => {
     for (let i = 0; i < 30; i++) await mkdir(join(home, `many/d${String(i).padStart(2, "0")}`), { recursive: true });
     expect((await setup()(`${home}/many/`)).folders).toHaveLength(TYPED_LIMIT);
   });
-  it("blank query lists known folders from Herdr then Paseo, deduped and capped", async () => {
+  it("blank query lists known folders from Herdr only, deduped and capped; Paseo's own workspaces never appear", async () => {
     const pane = (id: string, cwd: string) => ({ pane_id: id, terminal_id: `t-${id}`, workspace_id: "w1", tab_id: "tab", focused: false, cwd, agent_status: "idle", revision: 1 });
     fake.reply("pane.list", { type: "pane_list", panes: [pane("p1", "/work/a"), pane("p2", "/work/b")] });
     fake.reply("agent.list", { type: "agent_list", agents: [{ terminal_id: "t-p1", name: null, agent: "omp", agent_status: "idle", workspace_id: "w1", tab_id: "tab", pane_id: "p1", focused: false, cwd: "/work/a", revision: 1 }] });
-    const workspaces = { list: async () => ({ entries: [{ workspaceDirectory: "/work/b" }, { projectRootPath: "/work/c" }, { workspaceDirectory: "/work/d" }] }) };
-    const r = await setup()("  ", { workspaces });
+    const list = vi.fn(async () => ({ entries: [{ workspaceDirectory: "/work/b" }, { projectRootPath: "/work/c" }, { workspaceDirectory: "/work/d" }] }));
+    const r = await setup()("  ", { workspaces: { list } });
     expect(r.resolved).toBeNull();
-    expect(r.folders).toEqual([
-      { path: "/work/a", source: "herdr" }, { path: "/work/b", source: "herdr" },
-      { path: "/work/c", source: "paseo" }, { path: "/work/d", source: "paseo" },
-    ]);
-    const many = { list: async () => ({ entries: Array.from({ length: 40 }, (_, i) => ({ workspaceDirectory: `/p/${i}` })) }) };
-    expect((await setup()("", { workspaces: many })).folders).toHaveLength(15);
+    expect(r.folders).toEqual([{ path: "/work/a", source: "herdr" }, { path: "/work/b", source: "herdr" }]);
+    expect(list).not.toHaveBeenCalled();
   });
-  it("merges matching known folders after disk matches, keeping their source and not duplicating", async () => {
-    const workspaces = { list: async () => ({ entries: [{ workspaceDirectory: `${home}/Projects/alpha` }, { workspaceDirectory: "/elsewhere/alpha-two" }, { workspaceDirectory: "/x/unrelated" }] }) };
+  it("matches known Herdr folders after disk matches, keeping their source and not duplicating", async () => {
+    const pane = (id: string, cwd: string) => ({ pane_id: id, terminal_id: `t-${id}`, workspace_id: "w1", tab_id: "tab", focused: false, cwd, agent_status: "idle", revision: 1 });
+    fake.reply("pane.list", { type: "pane_list", panes: [pane("p1", `${home}/Projects/alpha`), pane("p2", "/elsewhere/alpha-two"), pane("p3", "/x/unrelated")] });
+    fake.reply("agent.list", { type: "agent_list", agents: [] });
+    const workspaces = { list: async () => ({ entries: [{ workspaceDirectory: "/paseo/only/alpha-three" }] }) };
     const r = await setup()(`${home}/Projects/al`, { workspaces });
     expect(r.folders).toEqual([
-      { path: `${home}/Projects/alpha`, source: "paseo" },
+      { path: `${home}/Projects/alpha`, source: "herdr" },
       { path: `${home}/Projects/alps`, source: "filesystem" },
       { path: `${home}/Projects/gamma-alpha`, source: "filesystem" },
     ]);

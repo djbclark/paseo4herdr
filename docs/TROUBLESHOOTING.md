@@ -138,7 +138,7 @@ A warning notice appears in the chat and input is disabled. The conversation sta
 | Prompt delivery is uncertain (notice) | Paseo couldn't confirm the message arrived. It is never sent twice. | Check the terminal; press **Stop** if a turn started that you don't want. |
 | Interrupt could not be delivered (notice) | The stop key couldn't be sent to the pane. | Press Esc in the terminal. |
 | Interrupt has not ended the turn (notice) | Esc was sent, but OMP is still working after 10 seconds. | Press Esc in the terminal. |
-| OMP kept text in its input box / may have kept your message in its input box (notice) | You stopped before OMP recorded the message and OMP restored it into its input box. | Clear the input box in the terminal (**⋯ → Open in terminal**). |
+| OMP kept text in its input box / may have kept your message in its input box (notice) | You stopped before OMP recorded the message and OMP restored it into its input box. | Clear the input box in the terminal (**Open in terminal** on the row). |
 | The agent may not have received your message (notice) | You stopped right after sending. This agent cannot discard restored text, and Herdr had already typed the message into the terminal, so it may be in the input box or recorded late. | Check the terminal before sending anything again. |
 
 ## Restart to enable input fails
@@ -173,7 +173,7 @@ A failed launch tells you what it created and gives `herdr agent attach` or `her
 
 ## Couldn't open a chat
 
-"Couldn't open a chat: …" appears on an agent row when attaching a chat to the running agent failed, for example "The Herdr agent in terminal … is no longer running" or "This OMP agent is already open in another conversation". Use **Import it instead**, which opens the folder's workspace; there choose **⋯ → Import session** and pick the agent by the name and pane shown.
+"Couldn't open a chat: …" appears on an agent row when attaching a chat to the running agent failed, for example "The Herdr agent in terminal … is no longer running" or "This OMP agent is already open in another conversation". Use **Import it instead**, which opens the folder's workspace; there choose Paseo's **Import session** and pick the agent by the name and pane shown.
 
 ## Chat belongs to another Herdr session
 
@@ -191,7 +191,7 @@ The chat was created on one Herdr session and the plugin settings now point at a
 
 ## Open in terminal is missing
 
-**Open in terminal** needs the daemon to find `herdr` on its `PATH` and the `herdr` CLI to reach the same socket by session name. The attach command in the **⋯** sheet names only the session (`herdr --session <name> agent attach <name>` for a named one), so with a custom socket path make sure the terminal you run it in reaches the same Herdr.
+**Open in terminal** needs the daemon to find `herdr` on its `PATH` and the `herdr` CLI to reach the same socket by session name. The attach command shown in the row names only the session (`herdr --session <name> agent attach <name>` for a named one), so with a custom socket path make sure the terminal you run it in reaches the same Herdr.
 
 ## Verify the install
 

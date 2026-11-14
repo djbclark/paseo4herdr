@@ -68,7 +68,7 @@ export interface DetailLine { label: string; value: string }
 
 const ACTIVITY_SOURCE = { transcript: "last message in the transcript", "session-file": "session file modified", chat: "Paseo chat updated" } as const;
 
-/** The ⋯ sheet's Details block: each fact with its absolute local time and where it came from. Facts we don't have are left out. */
+/** The row's Details block: each fact with its absolute local time and where it came from. Facts we don't have are left out. */
 export function detailLines(item: FlatAgent, nowMs: number): DetailLine[] {
   const { agent } = item;
   const lines: DetailLine[] = [];
@@ -86,6 +86,7 @@ export function detailLines(item: FlatAgent, nowMs: number): DetailLine[] {
   }
   if (agent.model) lines.push({ label: "Model", value: agent.model });
   if (agent.plain) lines.push({ label: "Running", value: agent.program ? `${agent.program}${agent.isShell ? " (shell)" : ""}` : "unknown program (no agent detected)" });
+  if (agent.cwd) lines.push({ label: "Folder", value: agent.cwd });
   lines.push({ label: "Pane", value: agent.paneId }, { label: "Terminal", value: agent.terminalId });
   return lines;
 }
