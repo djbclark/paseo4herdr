@@ -76,6 +76,22 @@ export function plainState(agent: { isShell: boolean; program: string | null }):
   return agent.isShell ? "Shell" : agent.program ?? "Terminal";
 }
 
+/** "New agent in this pane" applies to a pane with no agent only when it is a real shell and shell input is allowed. */
+export function plainPaneBindable(agent: { plain: boolean; isShell: boolean }, shellInput: boolean): boolean {
+  return !agent.plain || (shellInput && agent.isShell);
+}
+
+/**
+ * What a plain row shows next to its `$` glyph. When the pane's name is just the program (`vim`, `zsh`) the name is
+ * the title and the state word is dropped, so the row reads "$ vim", not "$ vim vim" or "$ Shell zsh".
+ */
+export function plainRowTitle(agent: { isShell: boolean; program: string | null }, label: string): { state: string; name: string | null } {
+  const state = plainState(agent);
+  const same = (a: string | null) => a !== null && a.trim().toLowerCase() === label.trim().toLowerCase();
+  if (same(agent.program) || same(state)) return { state: agent.program ?? state, name: null };
+  return { state, name: label };
+}
+
 /** The last two segments of a path with a leading ellipsis, so a long absolute folder stays useful in a narrow line. */
 export function shortPath(path: string): string {
   const parts = path.split(/[\\/]+/).filter(Boolean);

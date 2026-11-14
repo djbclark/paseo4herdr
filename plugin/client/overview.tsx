@@ -28,6 +28,8 @@ import {
   OVERVIEW_REFETCH_MS,
   pickableAgents,
   plainState,
+  plainRowTitle,
+  plainPaneBindable,
   statusGlyph,
   statusLabel,
   statusTone,
@@ -179,7 +181,7 @@ function Button({
  * Glyph and word as well as colour. The word drops on a phone, where line 2 starts with it. A pane with no agent shows what
  * it runs (`Shell`, `vim`) in muted text, never an agent status.
  */
-function StatusBadge({ agent, compact, theme }: { agent: OverviewAgent; compact: boolean; theme: Theme }) {
+function StatusBadge({ agent, compact, theme, plainText }: { agent: OverviewAgent; compact: boolean; theme: Theme; plainText?: string }) {
   const c = theme.colors;
   const { plain, status } = agent;
   const tone = plain ? "muted" : statusTone(status);
@@ -189,7 +191,7 @@ function StatusBadge({ agent, compact, theme }: { agent: OverviewAgent; compact:
   return (
     <Text style={text} accessibilityElementsHidden importantForAccessibility="no">
       {plain ? "$" : statusGlyph(status)}
-      {compact ? "" : ` ${plain ? plainState(agent) : statusLabel(status)}`}
+      {compact ? "" : ` ${plain ? plainText ?? plainState(agent) : statusLabel(status)}`}
     </Text>
   );
 }
@@ -378,7 +380,12 @@ const AgentRow = memo(function AgentRow({ item, place: placeLine, pin, times, al
   // A pane with no agent opens a chat only through its own chat or "New agent in this pane" (never by a bare tap on the row).
   const canOpen = Boolean(navigation && (paseoAgentId || (!agent.plain && agent.provider && cwd)));
   // A new chat bound to this pane. Offered when the pane has no chat yet; a pane that has one opens it from the row.
-  const canBindHere = Boolean(navigation && !paseoAgentId && agent.provider && cwd && (!agent.plain || shellInput));
+  // Plain panes qualify only when they are a real shell: a pane running vim or another program can't take a prompt.
+  const canBindHere = Boolean(navigation && !paseoAgentId && agent.provider && cwd && plainPaneBindable(agent, shellInput));
+  const bindLabel = link.isPending ? "Starting…" : compact ? "New agent here" : "New agent in this pane";
+  const plainTitle = agent.plain ? plainRowTitle(agent, label) : null;
+  const titleName = plainTitle ? plainTitle.name : label;
+  const bindButton = canBindHere ? <Button label={bindLabel} secondary disabled={busy} onPress={() => link.mutate()} styles={styles} /> : null;
   return (
     <View style={styles.agent}>
       <View style={styles.agentLine}>
@@ -390,8 +397,8 @@ const AgentRow = memo(function AgentRow({ item, place: placeLine, pin, times, al
           style={styles.agentMain}
         >
           <View style={styles.row}>
-            <StatusBadge agent={agent} compact={compact} theme={theme} />
-            <Text style={styles.text} numberOfLines={1}>{label}</Text>
+            <StatusBadge agent={agent} compact={compact && titleName !== null} theme={theme} plainText={plainTitle?.state} />
+            {titleName !== null ? <Text style={styles.text} numberOfLines={1}>{titleName}</Text> : null}
             {agent.harness && !compact ? <Text style={styles.muted}>{agent.harness}</Text> : null}
           </View>
           {/* react-native-web turns middle truncation into end truncation, so the pane number sits outside the shortened text. */}
@@ -406,9 +413,11 @@ const AgentRow = memo(function AgentRow({ item, place: placeLine, pin, times, al
           ) : null}
           {agent.plain && !paseoAgentId ? <Text style={styles.muted}>No agent detected in this terminal.</Text> : null}
         </Pressable>
-        {canBindHere ? <Button label={link.isPending ? "Starting…" : "New agent in this pane"} secondary disabled={busy} onPress={() => link.mutate()} styles={styles} /> : null}
+        {compact ? null : bindButton}
         <Button label="⋯" secondary onPress={() => setMore(true)} styles={styles} />
       </View>
+      {/* On a phone the button sits under the text, so it never squeezes the workspace and tab names. */}
+      {compact && bindButton ? <View style={styles.row}>{bindButton}</View> : null}
       {readOnly ? (
         <View style={styles.row}>
           <Text style={styles.warning}>Read-only: it started before the input companion was installed.</Text>

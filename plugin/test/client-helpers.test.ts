@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { shellGateEpoch } from "../shared/settings.js";
-import { withShellSwitch, archiveDuplicatesLabel, archiveFailureMessage, companionBanner, duplicateArchiveSkippedMessage, duplicateChatsToArchive, freshDuplicatesToArchive, folderFieldValue, needsHomeExpansion, agentLabel, describeTarget, EXISTING_AGENTS_LIMIT, paneText, pathTail, pickableAgents, placeText, plainState, statusLabel, statusTone, tabText, validateFolder, workspaceText } from "../client/helpers.js";
+import { withShellSwitch, archiveDuplicatesLabel, archiveFailureMessage, companionBanner, duplicateArchiveSkippedMessage, duplicateChatsToArchive, freshDuplicatesToArchive, folderFieldValue, needsHomeExpansion, agentLabel, describeTarget, EXISTING_AGENTS_LIMIT, paneText, pathTail, pickableAgents, placeText, plainState, plainRowTitle, plainPaneBindable, statusLabel, statusTone, tabText, validateFolder, workspaceText } from "../client/helpers.js";
 
 describe("withShellSwitch", () => {
   const base = { herdrSession: "s", allowShell: false, allowShellEpoch: 0 };
@@ -178,6 +178,18 @@ describe("Herdr names", () => {
     const item = { workspace: { number: 26, label: "codexbar" }, tab: { number: 1, label: "src" }, tabPanes: 2, agent: { paneLabel: null, paneNumber: 1 } };
     expect(placeText(item, false)).toBe("codexbar › src › pane 1");
     expect(placeText(item, true)).toBe("src › pane 1");
+  });
+  it("plainPaneBindable offers a new agent only on agent panes and real shells", () => {
+    expect(plainPaneBindable({ plain: false, isShell: false }, false)).toBe(true);
+    expect(plainPaneBindable({ plain: true, isShell: true }, true)).toBe(true);
+    expect(plainPaneBindable({ plain: true, isShell: true }, false)).toBe(false);
+    expect(plainPaneBindable({ plain: true, isShell: false }, true)).toBe(false);
+  });
+  it("plainRowTitle names a plain row once", () => {
+    expect(plainRowTitle({ isShell: false, program: "vim" }, "vim")).toEqual({ state: "vim", name: null });
+    expect(plainRowTitle({ isShell: true, program: "zsh" }, "zsh")).toEqual({ state: "zsh", name: null });
+    expect(plainRowTitle({ isShell: true, program: "zsh" }, "dev shell")).toEqual({ state: "Shell", name: "dev shell" });
+    expect(plainRowTitle({ isShell: false, program: null }, "term_1")).toEqual({ state: "Terminal", name: "term_1" });
   });
   it("plainState says Shell or the program, never an agent status", () => {
     expect(plainState({ isShell: true, program: "zsh" })).toBe("Shell");
