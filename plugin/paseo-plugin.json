@@ -2,6 +2,7 @@
   "id": "herdr-harness",
   "name": "Herdr",
   "description": "Chat with OMP agents running in Herdr terminal sessions from Paseo",
+  "media": ["assets/herdr-screen-desktop.png", "assets/herdr-screen-phone.png"],
   "requirements": {
     "paseo": ">=0.11.1"
   },

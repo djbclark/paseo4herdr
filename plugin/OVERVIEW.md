@@ -29,6 +29,10 @@ Installing or updating this plugin writes one file, `paseo4herdr-input.ts`, into
 - It never replaces a file it didn't write.
 - OMP loads extensions only at startup. Agents that were already running stay read-only until restarted. On the Herdr screen, **Restart to enable input** restarts an idle agent in place.
 
+## What it reads and sends
+
+The plugin reads Herdr's agent and pane lists over Herdr's local socket, and reads the OMP session transcripts that OMP writes under its own session directory, to show the conversation in Paseo. It sends nothing to a remote service. Only timestamps, the model id and the install state go from the plugin server to the client, for the Herdr screen and the cache estimate. Message content stays on the daemon host and goes only to Paseo clients you already connect. Installing writes one companion file, described above. Your sort choice is stored in a Paseo plugin setting.
+
 ## Limits
 
 - No token streaming. OMP writes complete messages, so replies appear a message at a time.
@@ -39,3 +43,4 @@ Installing or updating this plugin writes one file, `paseo4herdr-input.ts`, into
 - `/new` and `/resume` in the terminal freeze the current Paseo chat. Open the new conversation from the Herdr screen.
 - Stopping the Herdr server stops its agents. Open chats go read-only, and tapping the agent opens a new chat.
 - Approval cards in the real app have had limited testing. The terminal still works for every decision.
+- Tested on: alpha. It has been exercised on throwaway Paseo daemons with fake OMP panes, and not yet on the native iOS and Android clients or with real approvals.
