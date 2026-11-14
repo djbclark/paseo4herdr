@@ -5,18 +5,18 @@ import type { PluginHandlerContext, PluginServerContext } from "@getpaseo/plugin
 
 // Derived from the SDK: Paseo's compiler can't resolve @getpaseo/client in an install without node_modules.
 type PaseoApi = PluginHandlerContext["paseo"];
-import { herdrAgentRestartRpc, herdrChatAllowShellRpc, herdrChatShellAcknowledgeRpc, herdrChatReadyRpc, herdrDiagnosticsRpc, herdrDuplicatesArchiveRpc, herdrFoldersSuggestRpc, herdrOverviewRpc, herdrTargetRpc, herdrWorkspaceCreateRpc, type CompanionStatus, type HerdrTarget, type FolderSuggestion, type OverviewAgent, type OverviewTab, type OverviewWorkspace } from "../shared/rpc.js";
+import { herdrPaneCreateRpc, herdrAgentRestartRpc, herdrChatAllowShellRpc, herdrChatShellAcknowledgeRpc, herdrChatReadyRpc, herdrDiagnosticsRpc, herdrDuplicatesArchiveRpc, herdrFoldersSuggestRpc, herdrOverviewRpc, herdrTargetRpc, herdrWorkspaceCreateRpc, type CompanionStatus, type HerdrTarget, type FolderSuggestion, type OverviewAgent, type OverviewTab, type OverviewWorkspace } from "../shared/rpc.js";
 import { parseBinding, sameRef, sessionRefOf, type Binding } from "./binding.js";
 import { expandHome, suggestFolders } from "./folders.js";
 import { restartAgent } from "./restart.js";
 import { buildDiagnostics, type DiagnosticsInput } from "./diagnostics.js";
 import { PLUGIN_VERSION } from "./plugin-version.js";
 import type { BoundSessions, OpenSessions } from "./bound-sessions.js";
-import { attachArgs, attachCommand } from "./herdr-commands.js";
+import { attachArgs, attachCommand, terminalAttachArgs, terminalAttachCommand } from "./herdr-commands.js";
 import { resolveSocketPath } from "./herdr/socket-path.js";
 import { HerdrClient } from "./herdr/client.js";
 import { listPaneTargets } from "./herdr/targets.js";
-import { type AgentInfo, type PaneProcessInfo, PaneProcessInfoResultSchema, PaneListResultSchema, TabListResultSchema, WorkspaceCreatedResultSchema, WorkspaceListResultSchema } from "./herdr/schema.js";
+import { type AgentInfo, type PaneProcessInfo, PaneProcessInfoResultSchema, PaneListResultSchema, TabListResultSchema, TabCreatedResultSchema, WorkspaceCreatedResultSchema, WorkspaceListResultSchema } from "./herdr/schema.js";
 import type { ReadyTarget } from "./herdr/target.js";
 import type { HarnessAdapter } from "./harness/types.js";
 import { adapterAcceptsKind, createResolver, type AdapterResolver } from "./harness/resolve.js";
@@ -361,7 +361,7 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
   ): Promise<Map<string, boolean | null>> =>
     new Map(await Promise.all(agents.map(async (agent): Promise<[string, boolean | null]> => {
       const adapter = ownerAdapter(reconciled, agent, target, resolver);
-      if (!adapter?.inputReachable || !enabled(adapter.id)) return [agent.terminal_id, null];
+      if (!agent.agent || !adapter?.inputReachable || !enabled(adapter.id)) return [agent.terminal_id, null];
       try {
         const process = PaneProcessInfoResultSchema.parse(await request(socket, "pane.process_info", { pane_id: agent.pane_id })).process_info;
         const pid = process.foreground_process_group_id;
@@ -370,6 +370,30 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
         return [agent.terminal_id, null];
       }
     })));
+
+  /**
+   * The foreground program of each pane with no agent (one `pane.process_info` each, bounded). A pane Herdr can't read, or one
+   * that answers too slowly, has no entry: the row then says "Terminal" instead of a program name.
+   */
+  const readPrograms = async (socket: string, plain: readonly AgentInfo[]): Promise<Map<string, { name: string; isShell: boolean }>> => {
+    const isShell = deps.harnesses.find((adapter) => adapter.shell)?.shell?.isShell;
+    const entries = await Promise.all(plain.map(async (agent): Promise<[string, { name: string; isShell: boolean }] | null> => {
+      const info = await withDeadline(
+        request(socket, "pane.process_info", { pane_id: agent.pane_id }).then((reply) => PaneProcessInfoResultSchema.parse(reply).process_info, () => null),
+        FACTS_DEADLINE_MS,
+      );
+      if (!info) return null;
+      const leader = info.foreground_processes.find((candidate) => candidate.pid === info.foreground_process_group_id) ?? info.foreground_processes[0];
+      const name = leader?.name?.replace(/^-/, "").trim();
+      return name ? [agent.terminal_id, { name: name.slice(0, 80), isShell: Boolean(isShell?.({ name: leader!.name })) }] : null;
+    }));
+    return new Map(entries.filter((entry): entry is NonNullable<typeof entry> => entry !== null));
+  };
+
+  /** Whether a chat may type into a plain shell right now; an unreadable setting counts as closed. */
+  const shellGateOpen = async (): Promise<boolean> => {
+    try { return ((await deps.shellEpoch?.()) ?? null) !== null; } catch { return false; }
+  };
 
   /** A failing check is reported as `unknown` rather than failing the overview. */
   const readCompanion = (): Promise<CompanionStatus> =>
@@ -402,7 +426,7 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
     const companion = await readCompanion();
     const unavailable = (error: unknown) => ({
       target, ompEnabled, connection: { status: "unavailable" as const, error: errorMessage(error) },
-      companion, workspaces: [], chatError,
+      companion, workspaces: [], chatError, shellInput: false,
     });
     if (readyResult.status === "rejected") return unavailable(readyResult.reason);
     const ready = readyResult.value;
@@ -416,21 +440,27 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
         request(socket, "workspace.list", {}).then((r) => WorkspaceListResultSchema.parse(r).workspaces),
         request(socket, "tab.list", {}).then((r) => TabListResultSchema.parse(r).tabs),
         request(socket, "pane.list", {}).then((r) => PaneListResultSchema.parse(r).panes),
-        listPaneTargets(targets(socket)),
+        // Plain shells and other programs are listed too (`agent: null`); they carry no agent facts.
+        listPaneTargets(targets(socket), { includeShells: true }),
       ]);
+      const isPlain = (agent: AgentInfo) => !agent.agent;
+      const programs = await readPrograms(socket, agents.filter(isPlain));
+      const shellInput = await shellGateOpen();
       const live = new Map(agents.map((agent) => [agent.terminal_id, agent]));
       const reconciled = reconcileChats(chats, live, target, resolver, await paneProcesses(chats, live, target, resolver, (method, params) => request(socket, method, params)));
       const inputReady = await readInputReady(socket, agents, reconciled, target, enabled);
       const facts = new Map(await Promise.all(agents.map(async (agent): Promise<[string, AgentFacts]> => {
         const owner = ownerAdapter(reconciled, agent, target, resolver);
-        const roots = owner && enabled(owner.id) ? sessionRoots(owner.id) : [];
+        // A pane with no agent has no session file: nothing is read for it.
+        const roots = owner && enabled(owner.id) && !isPlain(agent) ? sessionRoots(owner.id) : [];
         return [agent.terminal_id, await readFacts(agent, reconciled.get(chatKey(target.herdrSession, agent.terminal_id))?.owner.lastActivityAt ?? null, roots)];
       })));
       // Keep each stamp current with what Herdr says now (idempotent with the loop), so a change never leaves a gap before the next sample.
       if (deps.statePollMs) {
         const seen = now();
-        for (const agent of agents) stamper.observe(chatKey(target.herdrSession, agent.terminal_id), agent.agent_status, agent.state_change_seq, seen);
+        for (const agent of agents) if (!isPlain(agent)) stamper.observe(chatKey(target.herdrSession, agent.terminal_id), agent.agent_status, agent.state_change_seq, seen);
       }
+      const paneLabel = new Map(panes.map((pane) => [pane.pane_id, pane.label?.trim() || null]));
       // Pane numbers: Herdr's own when it sends one, else the 1-based position among the tab's panes in list order.
       const paneNumber = new Map<string, number>();
       const perTab = new Map<string, number>();
@@ -457,6 +487,8 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
               // A disabled adapter is hidden (no provider link, no restart); its bound chats stay openable.
               const resolved = ownerAdapter(reconciled, agent, target, resolver);
               const adapter = resolved && enabled(resolved.id) ? resolved : undefined;
+              const plain = isPlain(agent);
+              const program = plain ? programs.get(agent.terminal_id) ?? null : null;
               const bound = reconciled.get(chatKey(target.herdrSession, agent.terminal_id));
               const fact = facts.get(agent.terminal_id)!;
               // A stamp counts only while it still matches the status and sequence Herdr reports now.
@@ -469,18 +501,27 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
                 name: agent.name ?? null,
                 title: agent.terminal_title_stripped ?? agent.title ?? agent.terminal_title ?? null,
                 kind: agent.agent ?? null,
-                harness: adapter?.label ?? null,
-                provider: adapter ? `herdr-${adapter.id}` : null,
-                status: agent.agent_status,
+                // A plain pane has no harness; its provider is the shell-capable one, used only to chat with it as a shell.
+                harness: plain ? null : adapter?.label ?? null,
+                provider: adapter && (!plain || adapter.shell) ? `herdr-${adapter.id}` : null,
+                status: plain ? "unknown" : agent.agent_status,
                 cwd: agent.cwd ?? agent.foreground_cwd ?? null,
                 paseoAgentId: bound?.owner.agentId ?? null,
                 duplicateChatIds: bound?.duplicates.map((chat) => chat.agentId) ?? [],
-                // `herdr agent attach` resolves names and pane ids, not terminal ids.
-                attachCommand: attachCommand(target.herdrSession, agent.name ?? agent.pane_id),
-                attach: herdrPath ? { command: herdrPath, args: attachArgs(target.herdrSession, agent.name ?? agent.pane_id) } : null,
+                // `herdr agent attach` resolves names and pane ids, not terminal ids; a pane with no agent is attached by terminal id.
+                attachCommand: plain
+                  ? terminalAttachCommand(target.herdrSession, agent.terminal_id)
+                  : attachCommand(target.herdrSession, agent.name ?? agent.pane_id),
+                attach: herdrPath
+                  ? { command: herdrPath, args: plain ? terminalAttachArgs(target.herdrSession, agent.terminal_id) : attachArgs(target.herdrSession, agent.name ?? agent.pane_id) }
+                  : null,
                 inputReady: inputReady.get(agent.terminal_id) ?? null,
-                canRestart: Boolean(adapter?.launch && adapter.resumeArgs && agent.agent_session),
+                canRestart: !plain && Boolean(adapter?.launch && adapter.resumeArgs && agent.agent_session),
                 paneNumber: paneNumber.get(agent.pane_id) ?? null,
+                paneLabel: paneLabel.get(agent.pane_id) ?? null,
+                plain,
+                program: program?.name ?? null,
+                isShell: program?.isShell ?? false,
                 lastActivityAt: fact.lastActivity?.at ?? null,
                 lastActivitySource: fact.lastActivity?.source ?? null,
                 stateChangedAt: stampCurrent ? stamp.at : null,
@@ -503,7 +544,7 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
           tabs: overviewTabs,
         };
       });
-      return { target, ompEnabled, connection: { status: "connected" as const, version: ready.version, autoStarted: ready.autoStarted }, companion, workspaces: out, chatError, serverNow: new Date(now()).toISOString(), ...(deps.statePollMs ? { statePollMs: deps.statePollMs } : {}) };
+      return { target, ompEnabled, connection: { status: "connected" as const, version: ready.version, autoStarted: ready.autoStarted }, companion, shellInput, workspaces: out, chatError, serverNow: new Date(now()).toISOString(), ...(deps.statePollMs ? { statePollMs: deps.statePollMs } : {}) };
     } catch (error) {
       return unavailable(error);
     }
@@ -622,7 +663,25 @@ export function registerManagementRpcs(server: Pick<PluginServerContext, "handle
     await deps.ensureReady(target);
     const name = label || basename(real) || real;
     const created = WorkspaceCreatedResultSchema.parse(await request(target.socketPath, "workspace.create", { cwd: real, label: name, focus: false }));
-    return { workspaceId: created.workspace.workspace_id, label: name, cwd: real };
+    return {
+      workspaceId: created.workspace.workspace_id, label: name, cwd: real,
+      paneId: created.root_pane.pane_id, terminalId: created.root_pane.terminal_id, shellInput: await shellGateOpen(),
+    };
+  });
+
+  server.handle(herdrPaneCreateRpc, async ({ workspaceId }) => {
+    const { target } = await deps.readTarget();
+    await deps.ensureReady(target);
+    // One new tab with one shell pane; no program is started in it. Without `cwd` Herdr roots it in the workspace.
+    const created = TabCreatedResultSchema.parse(await request(target.socketPath, "tab.create", { workspace_id: workspaceId, focus: false }));
+    return {
+      workspaceId: created.tab.workspace_id,
+      tabId: created.tab.tab_id,
+      paneId: created.root_pane.pane_id,
+      terminalId: created.root_pane.terminal_id,
+      cwd: created.root_pane.cwd ?? created.root_pane.foreground_cwd ?? null,
+      shellInput: await shellGateOpen(),
+    };
   });
 
   /** Stops the state-change loop (plugin shutdown). */

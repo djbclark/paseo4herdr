@@ -1,38 +1,63 @@
 import { describe, expect, it, vi } from "vitest";
-import { bindHerdrChat, createHerdrChat } from "../client/actions.js";
+import { bindHerdrChat, bindNewPane, createHerdrChat } from "../client/actions.js";
 import { registerHerdrHome } from "../client/home.js";
 import { createPaseoApi } from "@getpaseo/client";
 
 describe("createHerdrChat", () => {
-  it("creates in the folder's existing workspace without a second agent launch", async () => {
+  const pane = { label: "proj", paneId: "w9:p1", terminalId: "t-9", cwd: "/repo", shellInput: true };
+  it("opens a Herdr workspace and binds a chat to its pane; it never asks Paseo to launch the OMP provider", async () => {
     // Exercise the real SDK: mocking workspace.agents.create hid its provider/model validation.
     const createAgent = vi.fn(async () => ({ id: "chat-1" }));
     const openProject = vi.fn(async () => ({ workspace: { id: "folder-workspace", workspaceDirectory: "/repo" } }));
+    const createWorkspace = vi.fn(async () => pane);
+    const ready = vi.fn(async () => ({ flushed: 0 }));
     const paseo = createPaseoApi({ openProject, createAgent } as never);
     try {
-      expect(await createHerdrChat(paseo, " /repo ")).toBe("chat-1");
-      expect(openProject).toHaveBeenCalledExactlyOnceWith("/repo", undefined);
-      expect(createAgent).toHaveBeenCalledExactlyOnceWith({
-        workspaceId: "folder-workspace",
-        config: { provider: "herdr-omp", model: "native-default", cwd: "/repo" },
-      });
+      expect(await createHerdrChat(paseo, ready, " /repo ", createWorkspace)).toEqual({ agentId: "chat-1", note: null });
+      expect(createWorkspace).toHaveBeenCalledExactlyOnceWith("/repo");
+      expect(createAgent).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        config: expect.objectContaining({ provider: "herdr-generic", providerOptions: { herdrBind: { terminalId: "t-9", paneId: "w9:p1", allowShell: true } } }),
+      }));
+      expect(JSON.stringify(createAgent.mock.calls)).not.toContain("herdr-omp");
+      expect(ready).toHaveBeenCalledExactlyOnceWith({ terminalId: "t-9" });
     } finally { await paseo.dispose(); }
   });
-  it("resolves a ~ folder through the daemon and passes the absolute path to workspaces.open", async () => {
-    const open = vi.fn(async () => ({ agents: { create: async () => ({ id: "chat-2" }) } }));
-    const resolve = vi.fn(async () => "/home/me/proj");
-    expect(await createHerdrChat({ workspaces: { open } } as never, " ~/proj ", resolve)).toBe("chat-2");
-    expect(resolve).toHaveBeenCalledWith("~/proj");
-    expect(open).toHaveBeenCalledExactlyOnceWith("/home/me/proj");
-    await expect(createHerdrChat({ workspaces: { open } } as never, "~/x", async () => null)).rejects.toThrow("absolute");
-    expect(open).toHaveBeenCalledTimes(1);
-  });
-  it("refuses an empty folder before opening a workspace and propagates a folder failure", async () => {
-    const open = vi.fn(async () => { throw new Error("Folder unavailable"); });
-    const paseo = { workspaces: { open } } as never;
-    await expect(createHerdrChat(paseo, "  ")).rejects.toThrow("Enter a folder path");
+  it("opens the pane but binds nothing while shell input is off, and says so", async () => {
+    const open = vi.fn();
+    const result = await createHerdrChat({ workspaces: { open } } as never, async () => ({}), "/repo", async () => ({ ...pane, shellInput: false }));
+    expect(result.agentId).toBeNull();
+    expect(result.note).toMatch(/Opened a new terminal in proj/);
     expect(open).not.toHaveBeenCalled();
-    await expect(createHerdrChat(paseo, "/gone")).rejects.toThrow("Folder unavailable");
+  });
+  it("resolves a ~ folder through the daemon and passes the absolute path on", async () => {
+    const resolve = vi.fn(async () => "/home/me/proj");
+    const createWorkspace = vi.fn(async () => ({ ...pane, shellInput: false }));
+    await createHerdrChat({} as never, async () => ({}), " ~/proj ", createWorkspace, resolve);
+    expect(resolve).toHaveBeenCalledWith("~/proj");
+    expect(createWorkspace).toHaveBeenCalledExactlyOnceWith("/home/me/proj");
+    await expect(createHerdrChat({} as never, async () => ({}), "~/x", createWorkspace, async () => null)).rejects.toThrow("absolute");
+    expect(createWorkspace).toHaveBeenCalledTimes(1);
+  });
+  it("refuses an empty folder before creating anything, and explains a failed attach after the pane exists", async () => {
+    const createWorkspace = vi.fn(async () => pane);
+    await expect(createHerdrChat({} as never, async () => ({}), "  ", createWorkspace)).rejects.toThrow("Enter a folder path");
+    expect(createWorkspace).not.toHaveBeenCalled();
+    const open = vi.fn(async () => { throw new Error("Folder unavailable"); });
+    await expect(createHerdrChat({ workspaces: { open } } as never, async () => ({}), "/gone", createWorkspace)).rejects.toThrow(/Opened a new terminal in proj, but couldn't attach a chat to it: Folder unavailable/);
+  });
+});
+
+describe("bindNewPane", () => {
+  it("falls back to the workspace folder when Herdr reports none for the pane, and binds nothing without any folder", async () => {
+    const createAgent = vi.fn(async () => ({ id: "chat-7" }));
+    const openProject = vi.fn(async () => ({ workspace: { id: "ws", workspaceDirectory: "/ws" } }));
+    const paseo = createPaseoApi({ openProject, createAgent } as never);
+    try {
+      const fresh = { terminalId: "t", paneId: "p", cwd: null, shellInput: true };
+      expect(await bindNewPane(paseo, async () => ({}), fresh, "/ws", "api")).toEqual({ agentId: "chat-7", note: null });
+      expect(openProject).toHaveBeenCalledExactlyOnceWith("/ws", undefined);
+      expect((await bindNewPane(paseo, async () => ({}), fresh, null, "api")).agentId).toBeNull();
+    } finally { await paseo.dispose(); }
   });
 });
 
@@ -52,6 +77,17 @@ describe("bindHerdrChat", () => {
       }));
       expect(ready).toHaveBeenCalledExactlyOnceWith({ terminalId: "term-1" });
       expect(ready.mock.invocationCallOrder[0]).toBeGreaterThan(createAgent.mock.invocationCallOrder[0]);
+    } finally { await paseo.dispose(); }
+  });
+
+  it("binds a pane with no agent as shell input", async () => {
+    const createAgent = vi.fn(async () => ({ id: "chat-4" }));
+    const paseo = createPaseoApi({ openProject: async () => ({ workspace: { id: "w", workspaceDirectory: "/repo" } }), createAgent } as never);
+    try {
+      await bindHerdrChat(paseo, async () => ({}), { ...agent, provider: "herdr-generic", plain: true }, "zsh");
+      expect(createAgent).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        config: expect.objectContaining({ providerOptions: { herdrBind: { terminalId: "term-1", paneId: "w1:p2", allowShell: true } } }),
+      }));
     } finally { await paseo.dispose(); }
   });
 

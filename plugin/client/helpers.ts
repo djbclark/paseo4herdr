@@ -6,8 +6,8 @@ import { agoText, cacheSpeech, spoken, stateDurationSpeech, type CacheState } fr
 
 /** Pure helpers for the Herdr client UI (no React, no React Native). */
 
-/** Paseo provider id of the OMP harness; "New agent" launches through it. */
-export const HERDR_OMP_PROVIDER = "herdr-omp";
+/** Paseo provider id of the fallback harness, the only one that can chat with a plain shell pane (and only with shell input allowed). */
+export const HERDR_SHELL_PROVIDER = "herdr-generic";
 export const OVERVIEW_SCREEN_ID = "herdr-overview";
 
 export const OVERVIEW_QUERY_KEY = ["herdr", "overview"] as const;
@@ -42,21 +42,38 @@ export function statusGlyph(status: HerdrAgentStatus): string {
   return STATUS_GLYPHS[status];
 }
 
-/**
- * The place line: `W2 api-server › T3 tests › P1`. In a grouped card the workspace is the card header, so the `W` part drops.
- * A pane number Herdr didn't give is left out; the raw pane id lives in the details sheet.
- */
-export function placeText(item: Pick<FlatAgent, "workspace" | "tab"> & { agent: { paneNumber: number | null } }, grouped: boolean): string {
-  const parts = [tabText(item.tab)];
-  if (item.agent.paneNumber !== null) parts.push(`P${item.agent.paneNumber}`);
-  if (!grouped) parts.unshift(`W${item.workspace.number} ${item.workspace.label}`.trim());
-  return parts.join(" › ");
+/** The workspace as Herdr names it; its number only when it has no name. */
+export function workspaceText(workspace: { number: number; label: string }): string {
+  return workspace.label.trim() || `workspace ${workspace.number}`;
 }
 
-/** `T1 build`; Herdr's auto name for a tab is its number, which would read `T1 1`, so that case is just `T1`. */
+/** The tab as Herdr names it. Herdr's auto name for a tab is its number, so that case (and no name) reads `tab 1`. */
 export function tabText(tab: { number: number; label: string }): string {
   const label = tab.label.trim();
-  return label === "" || label === String(tab.number) ? `T${tab.number}` : `T${tab.number} ${label}`;
+  return label === "" || label === String(tab.number) ? `tab ${tab.number}` : label;
+}
+
+/**
+ * The pane's own name when the Herdr user set one. Without one, a pane is told apart by its number (`pane 2`) only when its
+ * tab holds more than one pane, because only then are two rows otherwise indistinguishable.
+ */
+export function paneText(agent: { paneLabel: string | null; paneNumber: number | null }, tabPanes: number): string {
+  const label = agent.paneLabel?.trim();
+  if (label) return label;
+  return tabPanes > 1 && agent.paneNumber !== null ? `pane ${agent.paneNumber}` : "";
+}
+
+/** The place line: `api-server › tests › pane 2`. In a grouped card the workspace is the card header, so it drops. */
+export function placeText(
+  item: { workspace: { number: number; label: string }; tab: { number: number; label: string }; tabPanes: number; agent: { paneLabel: string | null; paneNumber: number | null } },
+  grouped: boolean,
+): string {
+  return [grouped ? "" : workspaceText(item.workspace), tabText(item.tab), paneText(item.agent, item.tabPanes)].filter(Boolean).join(" › ");
+}
+
+/** What a pane with no agent is doing, in Herdr's terms: `Shell`, or the program in the foreground. */
+export function plainState(agent: { isShell: boolean; program: string | null }): string {
+  return agent.isShell ? "Shell" : agent.program ?? "Terminal";
 }
 
 /** The last two segments of a path with a leading ellipsis, so a long absolute folder stays useful in a narrow line. */
@@ -68,10 +85,15 @@ export function shortPath(path: string): string {
 /** One sentence for screen readers. Built on the coarse tick only, so it doesn't change every second. */
 export function agentSpeech(item: FlatAgent, label: string, cache: CacheState, nowMs: number): string {
   const { agent } = item;
-  const parts = [label, [statusLabel(agent.status).toLowerCase(), stateDurationSpeech(agent.stateChangedAt, agent.stateChangedExact, nowMs)].filter(Boolean).join(" ")];
+  const state = agent.plain
+    ? plainState(agent).toLowerCase()
+    : [statusLabel(agent.status).toLowerCase(), stateDurationSpeech(agent.stateChangedAt, agent.stateChangedExact, nowMs)].filter(Boolean).join(" ");
+  const parts = [label, state];
   if (agent.harness) parts.push(agent.harness);
-  parts.push(`workspace ${item.workspace.number} ${item.workspace.label}`, tabText(item.tab).replace(/^T/, "tab "));
-  if (agent.paneNumber !== null) parts.push(`pane ${agent.paneNumber}`);
+  const tab = tabText(item.tab);
+  const pane = paneText(agent, item.tabPanes);
+  parts.push(`workspace ${workspaceText(item.workspace)}`, tab.startsWith("tab ") ? tab : `tab ${tab}`);
+  if (pane) parts.push(pane.startsWith("pane ") ? pane : `pane ${pane}`);
   const active = agoText(agent.lastActivityAt, nowMs, false);
   if (active && active !== "<1m") parts.push(`active ${spokenAgo(agent.lastActivityAt, nowMs)}`);
   else if (active) parts.push("active less than a minute ago");
@@ -125,8 +147,39 @@ export function pathTail(path: string): string {
 }
 
 /** Readable agent label, the same one Paseo's Import session sheet shows (see shared/labels.ts). */
-export function agentLabel(agent: { title: string | null; name: string | null; kind: string | null; terminalId: string }): string {
-  return cleanTitle(agent.title) ?? agent.name ?? agent.kind ?? agent.terminalId;
+export function agentLabel(agent: { title: string | null; name: string | null; kind: string | null; terminalId: string; program?: string | null }): string {
+  return cleanTitle(agent.title) ?? agent.name ?? agent.kind ?? agent.program ?? agent.terminalId;
+}
+
+/** One existing Paseo agent in the "Open existing agent" list. */
+export interface ExistingAgent {
+  id: string;
+  title: string;
+  provider: string;
+  cwd: string;
+  updatedAt: string;
+}
+
+/** The part of a Paseo agent-list entry the picker reads. */
+interface ListedAgent {
+  agent: { id: string; title?: string | null; provider: string; cwd: string; updatedAt: string; archivedAt?: string | null };
+}
+
+export const EXISTING_AGENTS_LIMIT = 50;
+
+/**
+ * Paseo's agents for the "Open existing agent" picker: archived ones left out, newest first, narrowed by a case-insensitive
+ * match of `query` against title, folder and provider, and cut to {@link EXISTING_AGENTS_LIMIT}.
+ */
+export function pickableAgents(entries: readonly ListedAgent[], query: string): ExistingAgent[] {
+  const needle = query.trim().toLowerCase();
+  const time = (iso: string) => Date.parse(iso) || 0;
+  return entries
+    .filter(({ agent }) => !agent.archivedAt)
+    .map(({ agent }): ExistingAgent => ({ id: agent.id, title: agent.title?.trim() || "Untitled", provider: agent.provider, cwd: agent.cwd, updatedAt: agent.updatedAt }))
+    .filter((agent) => !needle || [agent.title, agent.cwd, agent.provider].some((field) => field.toLowerCase().includes(needle)))
+    .sort((a, b) => time(b.updatedAt) - time(a.updatedAt) || a.id.localeCompare(b.id))
+    .slice(0, EXISTING_AGENTS_LIMIT);
 }
 
 /** The value a picked suggestion puts in the field: the path plus "/" so the user can keep drilling down. */

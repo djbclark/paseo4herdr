@@ -157,6 +157,8 @@ A warning notice appears in the chat and input is disabled. The conversation sta
 
 ## New agent fails
 
+The Herdr screen's **New agent** buttons never launch a process: they bind a chat to a pane, creating a shell pane first for **New agent in this workspace**. If the new pane appears but no chat opens, the shell setting is off; turn it on in the plugin settings. The rows below apply to starting an agent from Paseo's own agent form.
+
 | Message | Cause | Fix |
 |---|---|---|
 | OMP input companion is not installed … / is outdated … | Starting an agent is refused while the companion isn't current, since it would be read-only. | [Run the installer](#run-the-installer-by-hand). |

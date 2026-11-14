@@ -5,10 +5,10 @@ import { z } from "zod";
  * P3.7 management RPC contracts, shared by server handlers (`server.handle`) and the client (`useRpc`).
  * The client never sends a socket path: the server resolves the Herdr target from the host settings.
  *
- * There is no `herdr.agent.start`: "New agent" calls Paseo's own `agents.create` with the
- * `herdr-<harness>` provider. That runs the P3 launch path (new tab in a workspace rooted at the cwd,
- * else a new workspace) and yields a real Paseo chat, which a plugin RPC could not, because the plugin
- * SDK has no agent-import call.
+ * There is no `herdr.agent.start`, and the Herdr screen never launches a process: every "New agent" binds a Paseo chat
+ * (`agents.create` with the `herdrBind` option) to a terminal pane that already exists, or to one `herdr.pane.create` or
+ * `herdr.workspace.create` just opened. A plugin RPC can't create the chat itself, because the plugin SDK has no
+ * agent-import call.
  */
 
 export const agentStatusSchema = z.enum(["idle", "working", "blocked", "done", "unknown"]);
@@ -80,6 +80,17 @@ export const overviewAgentSchema = z.object({
    */
   /** Herdr's 1-based pane number within its tab (position in `pane.list` when Herdr sends no number); null when unknown. */
   paneNumber: z.number().int().nullable().default(null),
+  /** The pane's own name when the Herdr user gave it one (`herdr pane rename`); null otherwise. */
+  paneLabel: z.string().max(200).nullable().default(null),
+  /**
+   * True for a pane with no detected agent: a plain shell or any other program. Such a row has no agent status (its `status`
+   * is `unknown` and the client does not show it), no transcript facts and no restart; it can be opened in a terminal.
+   */
+  plain: z.boolean().default(false),
+  /** Plain panes only: the foreground program's name (`zsh`, `vim`); null when Herdr didn't say, and for an agent. */
+  program: z.string().max(80).nullable().default(null),
+  /** Plain panes only: the foreground program is an interactive command shell. */
+  isShell: z.boolean().default(false),
   /** ISO. Newest of the transcript's last message, the session file's mtime, and the Paseo chat's last activity. */
   lastActivityAt: z.string().max(40).nullable().default(null),
   lastActivitySource: z.enum(["transcript", "session-file", "chat"]).nullable().default(null),
@@ -172,6 +183,8 @@ export const herdrOverviewRpc = defineRpc({
     serverNow: z.string().optional(),
     /** How often the plugin samples Herdr for state changes; state times are only accurate to about this. */
     statePollMs: z.number().int().optional(),
+    /** Shell input is allowed in the plugin settings now; a new agent in a plain shell pane can only chat then. */
+    shellInput: z.boolean().default(false),
     /** Empty when the connection is unavailable. */
     workspaces: z.array(overviewWorkspaceSchema),
     /** Linking Herdr agents to Paseo chats failed; agents still show, but "Open chat" may be missing. */
@@ -288,7 +301,34 @@ export const herdrWorkspaceCreateRpc = defineRpc({
     cwd: z.string().trim().min(1, "Enter a folder path"),
     label: z.string().trim().max(80).optional(),
   }),
-  output: z.object({ workspaceId: z.string(), label: z.string(), cwd: z.string() }),
+  output: z.object({
+    workspaceId: z.string(),
+    label: z.string(),
+    cwd: z.string(),
+    /** The new workspace's first pane (a plain shell); absent from a daemon that predates it. */
+    paneId: z.string().optional(),
+    terminalId: z.string().optional(),
+    shellInput: z.boolean().optional(),
+  }),
+});
+
+/**
+ * "New agent in this workspace": open a new Herdr tab (one empty shell pane) in an existing workspace. It never starts a
+ * program in the pane. The client then binds a chat to the pane when `shellInput` is true; the plugin setting that lets a
+ * chat type into a plain shell is off by default, and then the pane just appears in the list.
+ */
+export const herdrPaneCreateRpc = defineRpc({
+  name: "herdr.pane.create",
+  input: z.object({ workspaceId: z.string().min(1) }),
+  output: z.object({
+    workspaceId: z.string(),
+    tabId: z.string(),
+    paneId: z.string(),
+    terminalId: z.string(),
+    /** The new pane's folder as Herdr reports it; null when it doesn't. */
+    cwd: z.string().nullable(),
+    shellInput: z.boolean(),
+  }),
 });
 
 export const folderSourceSchema = z.enum(["herdr", "paseo", "filesystem"]);

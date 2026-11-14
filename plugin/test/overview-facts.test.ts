@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { TranscriptSummaryCache } from "../server/activity.js";
 import { registerManagementRpcs, type ManagementDeps } from "../server/rpc.js";
 import { ompAdapter } from "../server/harness/omp/adapter.js";
+import { genericAdapter } from "../server/harness/generic/adapter.js";
 import { herdrOverviewRpc, type HerdrTarget } from "../shared/rpc.js";
 import { FakeHerdr } from "./fake-herdr.js";
 
@@ -52,6 +53,48 @@ const writeSession = async (name: string, lines: object[]) => {
   return path;
 };
 const agents = (result: Awaited<ReturnType<ReturnType<typeof setup>["overview"]>>) => result.workspaces[0]!.tabs[0]!.agents;
+
+describe("panes with no agent", () => {
+  const processInfo = (paneId: string, name: string, pid = 100) => ({ type: "pane_process_info", process_info: { pane_id: paneId, shell_pid: pid, foreground_process_group_id: pid, tty: "ttys1", foreground_processes: [{ pid, name }] } });
+
+  it("are listed as rows with the program they run, no agent status and no session-file read", async () => {
+    seed([pane("p1", { label: "build" }), pane("p2")], [agent("p1")]);
+    fake.reply("pane.process_info", processInfo("p2", "-zsh"));
+    const reads: string[] = [];
+    const transcripts = new TranscriptSummaryCache();
+    const readWithin = transcripts.readWithin.bind(transcripts);
+    transcripts.readWithin = (path, ...rest) => { reads.push(path); return readWithin(path, ...rest); };
+    const { overview } = setup({ harnesses: [ompAdapter, genericAdapter], transcripts, findHerdr: async () => "/usr/bin/herdr", env: { HOME: "/home/u", PATH: "/bin" } });
+    const rows = agents(await overview());
+    expect(rows.map((row) => row.paneId)).toEqual(["p1", "p2"]);
+    const [first, shell] = rows;
+    expect(first).toMatchObject({ plain: false, paneLabel: "build", program: null, kind: "omp" });
+    expect(shell).toMatchObject({
+      plain: true, status: "unknown", kind: null, harness: null, program: "zsh", isShell: true, canRestart: false, inputReady: null,
+      lastActivityAt: null, lastActivitySource: null, stateChangedAt: null, sessionStartedAt: null, model: null, cache: null, paseoAgentId: null,
+    });
+    expect(shell!.attachCommand).toBe("herdr --session work terminal attach t-p2");
+    expect(reads).toEqual([]);
+  });
+
+  it("a program that is not a shell is named, and an unreadable pane is just a terminal", async () => {
+    seed([pane("p1"), pane("p2")], []);
+    fake.handle("pane.process_info", (req, s) => {
+      const paneId = (req.params as { pane_id: string }).pane_id;
+      s.end(JSON.stringify(paneId === "p1" ? { id: req.id, result: processInfo("p1", "vim") } : { id: req.id, error: { code: "pane_not_found", message: "gone" } }) + "\n");
+    });
+    const rows = agents(await setup({ harnesses: [ompAdapter, genericAdapter] }).overview());
+    expect(rows[0]).toMatchObject({ plain: true, program: "vim", isShell: false });
+    expect(rows[1]).toMatchObject({ plain: true, program: null, isShell: false });
+  });
+
+  it("only ask for a new chat when shell input is open", async () => {
+    seed([pane("p1")], []);
+    expect((await setup({ harnesses: [ompAdapter, genericAdapter] }).overview()).shellInput).toBe(false);
+    expect((await setup({ harnesses: [ompAdapter, genericAdapter], shellEpoch: async () => 12 }).overview()).shellInput).toBe(true);
+    expect((await setup({ harnesses: [ompAdapter, genericAdapter], shellEpoch: async () => { throw new Error("unreadable"); } }).overview()).shellInput).toBe(false);
+  });
+});
 
 describe("overview facts", () => {
   it("numbers panes within their tab (Herdr's own number when it sends one) and sends the daemon clock", async () => {

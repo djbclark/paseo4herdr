@@ -85,6 +85,8 @@ export interface FlatAgent {
   agent: OverviewAgent;
   workspace: { id: string; number: number; label: string; cwd: string | null };
   tab: { id: string; number: number; label: string };
+  /** How many panes (agents and plain terminals) the tab holds; a pane number is shown only when this is more than one. */
+  tabPanes: number;
 }
 
 export function flattenOverview(workspaces: readonly OverviewWorkspace[]): FlatAgent[] {
@@ -92,6 +94,7 @@ export function flattenOverview(workspaces: readonly OverviewWorkspace[]): FlatA
     agent,
     workspace: { id: workspace.workspaceId, number: workspace.number, label: workspace.label, cwd: workspace.cwd },
     tab: { id: tab.tabId, number: tab.number, label: tab.label },
+    tabPanes: tab.agents.length,
   }))));
 }
 
@@ -118,9 +121,10 @@ export function sortValue(field: SortField, item: FlatAgent): number | string | 
     case "lastActivity": return time(agent.lastActivityAt);
     case "stateChanged": return time(agent.stateChangedAt);
     // A working agent is using its cache (the row says so), so it has no cold-at to rank.
-    case "cacheCold": return agent.status === "working" ? null : cacheColdAtMs(agent.cache);
+    case "cacheCold": return agent.status === "working" || agent.plain ? null : cacheColdAtMs(agent.cache);
     case "sessionStarted": return time(agent.sessionStartedAt);
-    case "status": return STATUS_RANK[agent.status];
+    // A pane with no agent has no agent status: it ranks after every agent state.
+    case "status": return agent.plain ? Object.keys(STATUS_RANK).length : STATUS_RANK[agent.status];
     case "title": return text(agentLabel(agent));
     case "harness": return text(agent.harness ?? agent.kind);
     case "model": return text(agent.model);

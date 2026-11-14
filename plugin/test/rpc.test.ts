@@ -7,7 +7,7 @@ import { persistenceOf } from "../server/binding.js";
 import { createResolver } from "../server/harness/resolve.js";
 import { ompAdapter } from "../server/harness/omp/adapter.js";
 import { makeFakeAdapter } from "./fake-harness.js";
-import { herdrAgentRestartRpc, herdrDiagnosticsRpc, herdrDuplicatesArchiveRpc, herdrOverviewRpc, herdrTargetRpc, herdrWorkspaceCreateRpc, type HerdrTarget } from "../shared/rpc.js";
+import { herdrAgentRestartRpc, herdrDiagnosticsRpc, herdrDuplicatesArchiveRpc, herdrOverviewRpc, herdrPaneCreateRpc, herdrTargetRpc, herdrWorkspaceCreateRpc, type HerdrTarget } from "../shared/rpc.js";
 import { FakeHerdr } from "./fake-herdr.js";
 import { HerdrClient } from "../server/herdr/client.js";
 
@@ -128,6 +128,33 @@ it("workspace.create validates the path and creates once", async () => {
   const [req] = fake.requestsFor("workspace.create");
   expect(req.params).toMatchObject({ label: "proj", focus: false });
   expect(await call(herdrWorkspaceCreateRpc, { cwd: join(dir, "proj"), label: "Custom" })).toMatchObject({ label: "Custom" });
+});
+
+it("workspace.create also returns the first pane, for binding a chat to it", async () => {
+  fake.handle("workspace.create", (req, s) => s.end(JSON.stringify({ id: req.id, result: { type: "workspace_created", workspace: { workspace_id: "w9" }, tab: { tab_id: "t9" }, root_pane: { pane_id: "w9:p1", terminal_id: "tt", workspace_id: "w9", tab_id: "t9" } } }) + "\n"));
+  const { call } = setup({ checkDirectory: async (p) => p, shellEpoch: async () => 4 });
+  expect(await call(herdrWorkspaceCreateRpc, { cwd: "/x" })).toMatchObject({ workspaceId: "w9", paneId: "w9:p1", terminalId: "tt", shellInput: true });
+});
+
+describe("herdr.pane.create", () => {
+  const reply = () => fake.handle("tab.create", (req, s) => s.end(JSON.stringify({ id: req.id, result: { type: "tab_created", tab: { tab_id: "tab7", workspace_id: "w1" }, root_pane: { pane_id: "w1:p7", terminal_id: "t-7", workspace_id: "w1", tab_id: "tab7", cwd: "/proj" } } }) + "\n"));
+  it("opens one new tab in the workspace, starts no program in it, and reports whether a chat may type into the shell", async () => {
+    reply();
+    const open = setup({ shellEpoch: async () => 9 });
+    expect(await open.call(herdrPaneCreateRpc, { workspaceId: "w1" })).toEqual({ workspaceId: "w1", tabId: "tab7", paneId: "w1:p7", terminalId: "t-7", cwd: "/proj", shellInput: true });
+    const [req] = fake.requestsFor("tab.create");
+    expect(req!.params).toEqual({ workspace_id: "w1", focus: false });
+    for (const method of ["agent.start", "pane.run", "pane.send_text", "pane.split"]) expect(fake.requestsFor(method)).toHaveLength(0);
+    expect((await setup().call(herdrPaneCreateRpc, { workspaceId: "w1" })).shellInput).toBe(false);
+    expect((await setup({ shellEpoch: async () => { throw new Error("unreadable"); } }).call(herdrPaneCreateRpc, { workspaceId: "w1" })).shellInput).toBe(false);
+  });
+  it("propagates a readiness failure without asking Herdr, and does not retry a Herdr error", async () => {
+    await expect(setup({ ensureReady: async () => { throw new Error("target down"); } }).call(herdrPaneCreateRpc, { workspaceId: "w1" })).rejects.toThrow("target down");
+    expect(fake.requests).toHaveLength(0);
+    fake.replyError("tab.create", "workspace_not_found");
+    await expect(setup().call(herdrPaneCreateRpc, { workspaceId: "nope" })).rejects.toThrow();
+    expect(fake.requestsFor("tab.create")).toHaveLength(1);
+  });
 });
 
 it("workspace.create propagates readiness failure and does not retry a Herdr error", async () => {
@@ -469,7 +496,8 @@ it("a pane-mode chat stays live when the process cannot be read", async () => {
 it("a pane-mode chat that never bound a process stays live and costs no process read", async () => {
   const row = await paneRow({ pid: 99 })([paneChat("never-validated", null)]);
   expect(row.paseoAgentId).toBe("never-validated");
-  expect(fake.requestsFor("pane.process_info")).toHaveLength(0);
+  // Only the chat's own pane is the question here; a pane with no agent is read for its program name, which is unrelated.
+  expect(fake.requestsFor("pane.process_info").filter((request) => request.params.pane_id === "p1")).toHaveLength(0);
 });
 
 it("overview reports the companion state, including when the check fails or Herdr is unavailable", async () => {

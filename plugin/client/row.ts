@@ -1,5 +1,5 @@
 import type { FlatAgent } from "./sort.js";
-import { agentSpeech, shortPath, statusLabel, tabText } from "./helpers.js";
+import { agentSpeech, paneText, plainState, shortPath, statusLabel, tabText, workspaceText } from "./helpers.js";
 import { agoText, cacheColdAtMs, classifyCache, cacheText, clockText, clockTextMs, isCacheAlert, stateDurationText, type CacheState } from "./time.js";
 
 /**
@@ -9,7 +9,7 @@ import { agoText, cacheColdAtMs, classifyCache, cacheText, clockText, clockTextM
 export interface RowTexts {
   /** Line 2: where the agent is (and its folder when that adds something). */
   place: string;
-  /** The pane number (`P1`), shown after the place and never cut; empty when Herdr gave none. */
+  /** The pane's name, or `pane 2` when its tab holds several and it has no name; shown after the place and never cut; empty when not needed. */
   pin: string;
   /** The time and cache facts, joined; may be empty. */
   times: string;
@@ -21,7 +21,7 @@ export interface RowTexts {
 }
 
 /** Workspace and tab of the place line, without the pane (see `pin`). */
-const grouped = (item: FlatAgent, isGrouped: boolean): string => (isGrouped ? [] : [`W${item.workspace.number} ${item.workspace.label}`.trim()]).concat(tabText(item.tab)).join(" › ");
+const grouped = (item: FlatAgent, isGrouped: boolean): string => (isGrouped ? [] : [workspaceText(item.workspace)]).concat(tabText(item.tab)).join(" › ");
 
 const stripAgo = (text: string | null): string | null => (text ? text.replace(/ ago$/, "") : null);
 
@@ -30,16 +30,17 @@ export function rowTexts(item: FlatAgent, label: string, nowMs: number, opts: { 
   const state: CacheState = classifyCache(agent.cache, agent.status, nowMs);
   const speechNow = Math.floor(nowMs / 60_000) * 60_000;
   const cache = cacheText(state, opts.compact);
-  const stateDur = stateDurationText(agent.stateChangedAt, agent.stateChangedExact, nowMs);
+  // A pane with no agent has no agent state, so no "state since" either.
+  const stateDur = agent.plain ? null : stateDurationText(agent.stateChangedAt, agent.stateChangedExact, nowMs);
   const active = agoText(agent.lastActivityAt, nowMs);
   const started = agoText(agent.sessionStartedAt, nowMs, false);
   const showCwd = agent.cwd && (!opts.grouped || agent.cwd !== item.workspace.cwd);
-  const pane = agent.paneNumber !== null ? `P${agent.paneNumber}` : null;
+  const pane = paneText(agent, item.tabPanes);
   let place: string;
   let times: string[];
   if (opts.compact) {
-    const head = `${statusLabel(agent.status)}${stateDur ? ` ${stateDur}` : ""}`;
-    place = [head, opts.grouped ? null : `W${item.workspace.number} ${item.workspace.label}`, tabText(item.tab)].filter(Boolean).join(" · ");
+    const head = agent.plain ? plainState(agent) : `${statusLabel(agent.status)}${stateDur ? ` ${stateDur}` : ""}`;
+    place = [head, opts.grouped ? null : workspaceText(item.workspace), tabText(item.tab)].filter(Boolean).join(" · ");
     times = [active ? `active ${stripAgo(active)}` : null, cache].filter((part): part is string => Boolean(part));
   } else {
     // The pane number is returned apart from the place, so a narrow row can shorten the place and still show it.
@@ -54,7 +55,7 @@ export function rowTexts(item: FlatAgent, label: string, nowMs: number, opts: { 
   }
   return {
     place,
-    pin: pane ?? "",
+    pin: pane,
     times: times.join(" · "),
     cache,
     alert: isCacheAlert(state, agent.status),
@@ -84,6 +85,7 @@ export function detailLines(item: FlatAgent, nowMs: number): DetailLine[] {
     lines.push({ label: "Cache cold", value: `≈ ${cold} (estimate: Anthropic ${lifetime} cache from the last request${agent.cache.ttlKnown ? "" : "; lifetime assumed"})` });
   }
   if (agent.model) lines.push({ label: "Model", value: agent.model });
+  if (agent.plain) lines.push({ label: "Running", value: agent.program ? `${agent.program}${agent.isShell ? " (shell)" : ""}` : "unknown program (no agent detected)" });
   lines.push({ label: "Pane", value: agent.paneId }, { label: "Terminal", value: agent.terminalId });
   return lines;
 }

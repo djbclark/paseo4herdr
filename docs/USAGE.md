@@ -11,10 +11,11 @@ The screen shows, top to bottom:
 | Element | What it is |
 |---|---|
 | **Herdr unavailable: …** | Red line when the plugin can't reach Herdr. The text names the socket it tried. See [Herdr is unavailable](TROUBLESHOOTING.md#herdr-is-unavailable). |
-| Workspace cards | One card per Herdr workspace: its label, its folder (the first pane's working directory) and its agents. A workspace with none shows "No agents running." |
-| Agent rows | One row per agent in the workspace's tabs. See below. |
-| **New agent** button | At the bottom of a workspace card that has a folder. Starts a new OMP agent in that folder. Hidden when OMP agents are turned off in settings. |
-| **Start a chat** | A folder field plus **New agent**, for a folder that has no workspace yet. Hidden when Herdr is unreachable or OMP agents are off. |
+| Workspace cards | One card per Herdr workspace, titled with the workspace's name, with its folder (the first pane's working directory) and every terminal in it, agents and plain shells alike. A workspace with none shows "No terminals in this workspace." |
+| Terminal rows | One row per Herdr pane in the workspace's tabs. See below. |
+| **New agent in this workspace** | At the bottom of a workspace card that has a folder. Creates a new pane in that Herdr workspace (a shell, nothing is launched) and binds a Paseo chat to it. See [Starting a chat](#importing-an-agent-or-starting-one). |
+| **Open existing agent** | At the top. Lists existing Paseo chats and opens the one you pick. It does not move a chat into a Herdr pane. |
+| **Start a chat** | A folder field plus **New agent**, for a folder that has no workspace yet. Hidden when Herdr is unreachable. |
 | **New workspace** | A folder field, an optional label, and **Create workspace**. Creates an empty Herdr workspace (not focused in Herdr); the label defaults to the folder's name. |
 | **Connection** | The effective Herdr target (socket, session, whether auto-start is on), the Herdr version when connected, and "(auto-started by Paseo)" when Paseo started the Herdr server. |
 
@@ -22,11 +23,13 @@ The screen shows, top to bottom:
 
 Each row shows the agent's name, its status (a symbol and a word) and its harness. The raw pane id, for example `w2:p1`, is in the **⋯** sheet. The name is the terminal title with the prompt glyph removed, else the Herdr agent name.
 
-Each row also shows where the agent is (`W2 api-server › T3 tests › P1`; the workspace part is dropped inside a workspace card) and a line of times: last activity, how long it has been in its state, whether its prompt cache is estimated to be cold (Anthropic models only, always marked "est."), when the session started, and the model. A time the plugin can't know is left out. Time in state counts from when the plugin first saw the agent, so right after a daemon restart it reads `≥ 52m`. **⋯** shows the exact times and where each came from.
+Each row also shows where the agent is (`api-server › tests`, using the workspace and tab names; the workspace part is dropped inside a workspace card). A pane is named only when it is needed: its Herdr pane name, or `pane 2` when the tab holds several panes and a line of times: last activity, how long it has been in its state, whether its prompt cache is estimated to be cold (Anthropic models only, always marked "est."), when the session started, and the model. A time the plugin can't know is left out. Time in state counts from when the plugin first saw the agent, so right after a daemon restart it reads `≥ 52m`. **⋯** shows the exact times and where each came from.
 
 The row above the cards sets the order: **Sort** picks the field (Herdr order by default, last activity, state changed, cache cold at, session started, status, title, harness, model, workspace, tab, pane, folder, has chat, input ready, duplicates), the arrow reverses it, and **Grouped / Flat** switches between one card per workspace and one list. Picking a field resets the direction to its natural one (newest first for times). Agents with no value for the field go last. The choice is saved per host.
 
 Status is Herdr's own: **Idle**, **Working**, **Blocked** (waiting for a decision), **Done** or **Unknown**.
+
+A pane with no agent (a plain shell, vim, a build) is listed too. Its state reads **Shell** or the program's name, never an agent status, and it has no times, no cache estimate and no transcript. It sorts after every agent in the status sort. Its **⋯** sheet has **Open terminal**, which opens a Paseo terminal running `herdr terminal attach`.
 
 Tap the row to open its chat:
 
@@ -47,15 +50,13 @@ The **⋯** button opens a sheet with:
 
 **Import** an agent that is already running in Herdr by tapping it on the Herdr screen, or through Paseo's own **Import session** with the **OMP (Herdr)** provider. Import agents only through **OMP (Herdr)**. Importing the same session through Paseo's built-in OMP provider as well starts a second OMP process on the same session file.
 
-**Start** a new agent from the Herdr screen (**New agent** or **Start a chat**) or from Paseo's agent form with the **OMP (Herdr)** provider and a folder. The plugin then:
+**Start** a chat from the Herdr screen. The plugin never launches an agent process. It binds a Paseo chat to a Herdr pane:
 
-1. Looks for a Herdr pane already in that folder. If it finds one, it adds a tab labelled `paseo` to that pane's workspace. Otherwise it creates a workspace named after the folder. Neither is focused in Herdr.
-2. Starts `omp` in the new pane as a Herdr agent named `paseo-<6 hex digits>`, passing `--model` and `--thinking` when you picked them in Paseo.
-3. Waits up to 30 seconds for the agent to be ready, then opens the chat.
+1. **New agent in this pane** (on a row) binds a chat to that existing pane.
+2. **New agent in this workspace** (on a workspace card) first creates a new tab with one shell pane in that Herdr workspace (not focused in Herdr), then binds a chat to it.
+3. **Start a chat** (folder field) finds a workspace for that folder, or creates one, and does the same.
 
-If the input companion isn't current, starting is refused up front with the companion's diagnostic, because the new agent would be read-only. If the launch fails, the error says what Herdr created and how to attach to or inspect the pane.
-
-The agent keeps running in Herdr when you close the Paseo chat. A notice in the new chat shows the attach command.
+A new pane is a plain shell. Chatting with a plain shell needs the shell setting on; with it off the pane is still created and a toast says so, with no chat bound. Whatever should run in the pane, you start yourself in the terminal.
 
 ### Folder fields
 

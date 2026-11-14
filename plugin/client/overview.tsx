@@ -9,6 +9,7 @@ import {
   herdrDuplicatesArchiveRpc,
   herdrFoldersSuggestRpc,
   herdrOverviewRpc,
+  herdrPaneCreateRpc,
   herdrWorkspaceCreateRpc,
   type OverviewAgent,
 } from "../shared/rpc.js";
@@ -21,13 +22,17 @@ import {
   duplicateArchiveSkippedMessage,
   duplicateChatsToArchive,
   errorMessage,
+  EXISTING_AGENTS_LIMIT,
   freshDuplicatesToArchive,
   OVERVIEW_QUERY_KEY,
   OVERVIEW_REFETCH_MS,
+  pickableAgents,
+  plainState,
   statusGlyph,
   statusLabel,
   statusTone,
   validateFolder,
+  workspaceText,
 } from "./helpers.js";
 import { agentPlace } from "../shared/labels.js";
 import { herdrViewSettings } from "../shared/settings.js";
@@ -47,7 +52,7 @@ import {
 } from "./sort.js";
 import { clockSkewMs, classifyCache, tickIntervalMs } from "./time.js";
 import { detailLines, rowTexts } from "./row.js";
-import { bindHerdrChat, createHerdrChat } from "./actions.js";
+import { bindHerdrChat, bindNewPane, createHerdrChat, type NewPane } from "./actions.js";
 import { FolderField } from "./folder-field.js";
 
 type Theme = PluginScreenProps["theme"];
@@ -170,17 +175,21 @@ function Button({
   );
 }
 
-/** Glyph and word as well as colour. The word drops on a phone, where line 2 starts with it. */
-function StatusBadge({ status, compact, theme }: { status: OverviewAgent["status"]; compact: boolean; theme: Theme }) {
+/**
+ * Glyph and word as well as colour. The word drops on a phone, where line 2 starts with it. A pane with no agent shows what
+ * it runs (`Shell`, `vim`) in muted text, never an agent status.
+ */
+function StatusBadge({ agent, compact, theme }: { agent: OverviewAgent; compact: boolean; theme: Theme }) {
   const c = theme.colors;
-  const tone = statusTone(status);
+  const { plain, status } = agent;
+  const tone = plain ? "muted" : statusTone(status);
   const color =
     tone === "success" ? c.statusSuccess : tone === "warning" ? c.statusWarning : tone === "accent" ? c.accent : c.foregroundMuted;
   const text = useMemo(() => ({ color, fontWeight: "600" as const }), [color]);
   return (
     <Text style={text} accessibilityElementsHidden importantForAccessibility="no">
-      {statusGlyph(status)}
-      {compact ? "" : ` ${statusLabel(status)}`}
+      {plain ? "$" : statusGlyph(status)}
+      {compact ? "" : ` ${plain ? plainState(agent) : statusLabel(status)}`}
     </Text>
   );
 }
@@ -234,7 +243,7 @@ function MoreSheet({ item, label, open, onOpenChange, onRestart, navigation, sty
   // A Paseo terminal running `herdr agent attach` (no shell) in the Paseo workspace for the agent's folder.
   const terminal = useMutation({
     mutationFn: async () => {
-      if (!attach || !cwd) throw new Error("This agent can't be opened in a terminal");
+      if (!attach || !cwd) throw new Error(`This ${agent.plain ? "terminal" : "agent"} can't be opened in a terminal`);
       const workspace = await paseo.workspaces.open(cwd);
       await workspace.terminals.create({ name: `Herdr: ${label}`, command: attach.command, args: attach.args });
       return workspace.id;
@@ -272,7 +281,7 @@ function MoreSheet({ item, label, open, onOpenChange, onRestart, navigation, sty
           </View>
         ) : null}
         {attach && cwd && navigation ? (
-          <Button label={terminal.isPending ? "Opening…" : "Open in terminal"} secondary disabled={terminal.isPending} onPress={() => terminal.mutate()} styles={styles} />
+          <Button label={terminal.isPending ? "Opening…" : agent.plain ? "Open terminal" : "Open in terminal"} secondary disabled={terminal.isPending} onPress={() => terminal.mutate()} styles={styles} />
         ) : null}
         {agent.canRestart ? <Button label="Restart agent" secondary onPress={restart} styles={styles} /> : null}
         <Text style={styles.muted}>Attach from any terminal on this computer:</Text>
@@ -290,8 +299,8 @@ function MoreSheet({ item, label, open, onOpenChange, onRestart, navigation, sty
  * One live Herdr agent. Tapping it opens its Paseo chat. Memoised: the screen's clock tick re-renders every row, and
  * a row repaints only when the text it shows changed (`place`, `times`, `alert`, `speech` are plain values).
  */
-const AgentRow = memo(function AgentRow({ item, place: placeLine, pin, times, alert, speech, compact, theme, styles, navigation, onChanged }: {
-  item: FlatAgent; place: string; pin: string; times: string; alert: boolean; speech: string; compact: boolean;
+const AgentRow = memo(function AgentRow({ item, place: placeLine, pin, times, alert, speech, compact, shellInput, theme, styles, navigation, onChanged }: {
+  item: FlatAgent; place: string; pin: string; times: string; alert: boolean; speech: string; compact: boolean; shellInput: boolean;
   theme: Theme; styles: Styles; navigation: Navigation; onChanged(): void;
 }) {
   const { agent } = item;
@@ -366,19 +375,22 @@ const AgentRow = memo(function AgentRow({ item, place: placeLine, pin, times, al
     },
     onError: (error) => toast.error(`Couldn't check the chats before archiving: ${errorMessage(error)}`),
   });
-  const canOpen = Boolean(navigation && (paseoAgentId || (agent.provider && cwd)));
+  // A pane with no agent opens a chat only through its own chat or "New agent in this pane" (never by a bare tap on the row).
+  const canOpen = Boolean(navigation && (paseoAgentId || (!agent.plain && agent.provider && cwd)));
+  // A new chat bound to this pane. Offered when the pane has no chat yet; a pane that has one opens it from the row.
+  const canBindHere = Boolean(navigation && !paseoAgentId && agent.provider && cwd && (!agent.plain || shellInput));
   return (
     <View style={styles.agent}>
       <View style={styles.agentLine}>
         <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`Open chat: ${speech}`}
+          accessibilityRole={canOpen ? "button" : "text"}
+          accessibilityLabel={canOpen ? `Open chat: ${speech}` : speech}
           disabled={!canOpen || busy}
           onPress={open}
           style={styles.agentMain}
         >
           <View style={styles.row}>
-            <StatusBadge status={agent.status} compact={compact} theme={theme} />
+            <StatusBadge agent={agent} compact={compact} theme={theme} />
             <Text style={styles.text} numberOfLines={1}>{label}</Text>
             {agent.harness && !compact ? <Text style={styles.muted}>{agent.harness}</Text> : null}
           </View>
@@ -388,11 +400,13 @@ const AgentRow = memo(function AgentRow({ item, place: placeLine, pin, times, al
             {pin ? <Text style={[styles.muted, styles.placePin]} numberOfLines={1}>{`${compact ? "·" : "›"} ${pin}`}</Text> : null}
           </View>
           {times ? <Text style={alert ? styles.warning : styles.muted}>{times}</Text> : null}
-          {!agent.provider ? <Text style={styles.muted}>No Paseo provider handles this agent kind.</Text> : null}
-          {agent.provider && !paseoAgentId ? (
+          {!agent.plain && !agent.provider ? <Text style={styles.muted}>No Paseo provider handles this agent kind.</Text> : null}
+          {!agent.plain && agent.provider && !paseoAgentId ? (
             <Text style={styles.muted}>{link.isPending ? "Opening a chat…" : "No chat yet: tap to open one."}</Text>
           ) : null}
+          {agent.plain && !paseoAgentId ? <Text style={styles.muted}>No agent detected in this terminal.</Text> : null}
         </Pressable>
+        {canBindHere ? <Button label={link.isPending ? "Starting…" : "New agent in this pane"} secondary disabled={busy} onPress={() => link.mutate()} styles={styles} /> : null}
         <Button label="⋯" secondary onPress={() => setMore(true)} styles={styles} />
       </View>
       {readOnly ? (
@@ -411,7 +425,7 @@ const AgentRow = memo(function AgentRow({ item, place: placeLine, pin, times, al
       {link.error ? (
         <View style={styles.row}>
           <Text accessibilityRole="alert" style={styles.danger}>Couldn't open a chat: {errorMessage(link.error)}</Text>
-          {cwd && navigation ? <Button label="Import it instead" secondary disabled={busy} onPress={() => folder.mutate()} styles={styles} /> : null}
+          {cwd && navigation && !agent.plain ? <Button label="Import it instead" secondary disabled={busy} onPress={() => folder.mutate()} styles={styles} /> : null}
         </View>
       ) : null}
       {folder.error ? <Text accessibilityRole="alert" style={styles.danger}>{errorMessage(folder.error)}</Text> : null}
@@ -433,14 +447,28 @@ function NewAgentButton({
   onCreated(): void;
 }) {
   const paseo = usePaseo();
+  const toast = useToast();
   const suggest = useRpc(herdrFoldersSuggestRpc);
+  const ready = useRpc(herdrChatReadyRpc);
+  const createWorkspace = useRpc(herdrWorkspaceCreateRpc);
   const mutation = useMutation({
-    mutationFn: async () => {
-      return createHerdrChat(paseo, cwd, async (folder) => (await suggest({ query: folder })).resolved);
-    },
-    onSuccess: (agentId) => {
+    // A new Herdr workspace in the folder, then a chat bound to its first pane. No process is launched.
+    mutationFn: () =>
+      createHerdrChat(
+        paseo,
+        ready,
+        cwd,
+        async (folder) => {
+          const created = await createWorkspace({ cwd: folder });
+          if (!created.paneId || !created.terminalId) throw new Error("This Paseo daemon runs an older Herdr plugin; update it to start a chat from a folder.");
+          return { label: created.label, paneId: created.paneId, terminalId: created.terminalId, cwd: created.cwd, shellInput: created.shellInput ?? false };
+        },
+        async (folder) => (await suggest({ query: folder })).resolved,
+      ),
+    onSuccess: (result) => {
       onCreated();
-      navigation?.openAgent({ agentId });
+      if (result.note === null) navigation?.openAgent({ agentId: result.agentId });
+      else toast.show(result.note, { variant: "info" });
     },
   });
   const { isPending, error, mutate } = mutation;
@@ -482,7 +510,7 @@ function WorkspaceCard({
   grouped,
   compact,
   nowMs,
-  ompEnabled,
+  shellInput,
   theme,
   styles,
   navigation,
@@ -492,7 +520,7 @@ function WorkspaceCard({
   grouped: boolean;
   compact: boolean;
   nowMs: number;
-  ompEnabled: boolean;
+  shellInput: boolean;
   theme: Theme;
   styles: Styles;
   navigation: Navigation;
@@ -501,9 +529,9 @@ function WorkspaceCard({
   const { workspace, agents } = group;
   return (
     <View style={styles.card}>
-      <Text style={styles.title} numberOfLines={1}>{workspace ? `W${workspace.number} ${workspace.label}` : "All agents"}</Text>
+      <Text style={styles.title} numberOfLines={1}>{workspace ? workspaceText(workspace) : "All terminals"}</Text>
       {workspace?.cwd ? <Text selectable style={styles.muted} numberOfLines={1}>{workspace.cwd}</Text> : null}
-      {agents.length === 0 ? <Text style={styles.muted}>No agents running.</Text> : null}
+      {agents.length === 0 ? <Text style={styles.muted}>No terminals in this workspace.</Text> : null}
       {agents.map((item) => {
         const texts = rowTexts(item, agentLabel(item.agent), nowMs, { compact, grouped });
         return (
@@ -516,6 +544,7 @@ function WorkspaceCard({
             alert={texts.alert}
             speech={texts.speech}
             compact={compact}
+            shellInput={shellInput}
             theme={theme}
             styles={styles}
             navigation={navigation}
@@ -523,9 +552,43 @@ function WorkspaceCard({
           />
         );
       })}
-      {ompEnabled && workspace?.cwd ? (
-        <NewAgentButton cwd={workspace.cwd} styles={styles} navigation={navigation} onCreated={onChanged} />
+      {workspace && navigation ? (
+        <NewAgentInWorkspaceButton workspace={workspace} styles={styles} navigation={navigation} onCreated={onChanged} />
       ) : null}
+    </View>
+  );
+}
+
+/** "New agent in this workspace": a new Herdr tab with an empty shell, then a chat bound to it (never a launched process). */
+function NewAgentInWorkspaceButton({ workspace, styles, navigation, onCreated }: {
+  workspace: NonNullable<AgentGroup["workspace"]>; styles: Styles; navigation: Navigation; onCreated(): void;
+}) {
+  const paseo = usePaseo();
+  const toast = useToast();
+  const createPane = useRpc(herdrPaneCreateRpc);
+  const ready = useRpc(herdrChatReadyRpc);
+  const title = workspaceText(workspace);
+  const mutation = useMutation({
+    mutationFn: async () => {
+      const pane: NewPane = await createPane({ workspaceId: workspace.id });
+      return bindNewPane(paseo, ready, pane, workspace.cwd, title);
+    },
+    onSuccess: (result) => {
+      onCreated();
+      if (result.note === null) navigation?.openAgent({ agentId: result.agentId });
+      else toast.show(result.note, { variant: "info" });
+    },
+    // The pane exists even when the chat could not be attached, so the list must show it.
+    onError: () => onCreated(),
+  });
+  const { isPending, error, mutate } = mutation;
+  const start = useCallback(() => {
+    if (!isPending) mutate();
+  }, [isPending, mutate]);
+  return (
+    <View style={styles.row}>
+      <Button label={isPending ? "Starting…" : "New agent in this workspace"} secondary disabled={isPending} onPress={start} styles={styles} />
+      {error ? <Text accessibilityRole="alert" style={styles.danger}>{errorMessage(error)}</Text> : null}
     </View>
   );
 }
@@ -591,6 +654,54 @@ function useTick(intervalMs: number): number {
     return () => { stop(); subscription.remove(); };
   }, [intervalMs]);
   return tick;
+}
+
+/**
+ * "Open existing agent": a searchable list of Paseo's own agents (any provider, archived ones left out). Tapping one opens its
+ * chat. A plugin can't re-attach a chat that another provider owns to a Herdr pane, so this opens it and nothing more; a
+ * Herdr agent's own chat is the row on this screen.
+ */
+function ExistingAgentPicker({ open, onOpenChange, navigation, theme, styles }: {
+  open: boolean; onOpenChange(open: boolean): void; navigation: NonNullable<Navigation>; theme: Theme; styles: Styles;
+}) {
+  const paseo = usePaseo();
+  const [filter, setFilter] = useState("");
+  const query = useQuery({
+    queryKey: ["herdr", "existing-agents"],
+    queryFn: () => paseo.agents.list({ page: { limit: 200 } }),
+    enabled: open,
+    staleTime: 0,
+  });
+  const entries = query.data?.entries;
+  const shown = useMemo(() => (entries ? pickableAgents(entries, filter) : []), [entries, filter]);
+  const pick = useCallback((agentId: string) => {
+    onOpenChange(false);
+    navigation.openAgent({ agentId });
+  }, [navigation, onOpenChange]);
+  return (
+    <Modal title="Open existing agent" open={open} onOpenChange={onOpenChange}>
+      <Modal.Content>
+        <TextInput
+          accessibilityLabel="Filter agents"
+          placeholder="Filter by title, folder or provider"
+          placeholderTextColor={theme.colors.foregroundMuted}
+          value={filter}
+          onChangeText={setFilter}
+          style={styles.input}
+        />
+        {query.isPending ? <Text style={styles.muted}>Loading…</Text> : null}
+        {query.error ? <Text accessibilityRole="alert" style={styles.danger}>{errorMessage(query.error)}</Text> : null}
+        {entries && shown.length === 0 ? <Text style={styles.muted}>{filter.trim() ? "No agent matches." : "No agents yet."}</Text> : null}
+        {shown.map((agent) => (
+          <Pressable key={agent.id} accessibilityRole="button" accessibilityLabel={`Open ${agent.title}`} onPress={() => pick(agent.id)} style={styles.option}>
+            <Text style={styles.text} numberOfLines={1}>{agent.title}</Text>
+            <Text style={styles.muted} numberOfLines={1}>{[agent.provider, agent.cwd].join(" · ")}</Text>
+          </Pressable>
+        ))}
+        {entries && shown.length === EXISTING_AGENTS_LIMIT ? <Text style={styles.muted}>Showing the {EXISTING_AGENTS_LIMIT} newest; filter to narrow.</Text> : null}
+      </Modal.Content>
+    </Modal>
+  );
 }
 
 function SortPicker({ view, open, onOpenChange, onChange, styles }: {
@@ -708,6 +819,7 @@ export function HerdrOverviewScreen({ theme, layout, navigation }: PluginScreenP
   }, [queryClient]);
   const data = query.data;
   const [view, setView] = useView();
+  const [picking, setPicking] = useState(false);
   // Re-sorted only when new data arrives or the choice changes, never on a clock tick, so rows don't jump.
   const workspaces = data?.workspaces;
   const groups = useMemo(() => {
@@ -728,7 +840,9 @@ export function HerdrOverviewScreen({ theme, layout, navigation }: PluginScreenP
       <View style={styles.row}>
         <Text style={styles.title}>Herdr</Text>
         <Button label={query.isFetching ? "Refreshing…" : "Refresh"} secondary onPress={refresh} styles={styles} />
+        {navigation ? <Button label="Open existing agent" secondary onPress={() => setPicking(true)} styles={styles} /> : null}
       </View>
+      {navigation ? <ExistingAgentPicker open={picking} onOpenChange={setPicking} navigation={navigation} theme={theme} styles={styles} /> : null}
       {data && data.connection.status === "connected" ? <SortBar view={view} onChange={setView} compact={layout.compact} styles={styles} /> : null}
       {query.error ? (
         <Text accessibilityRole="alert" style={styles.danger}>
@@ -757,14 +871,14 @@ export function HerdrOverviewScreen({ theme, layout, navigation }: PluginScreenP
               grouped={view.grouped}
               compact={layout.compact}
               nowMs={nowMs}
-              ompEnabled={data.ompEnabled}
+              shellInput={data.shellInput}
               theme={theme}
               styles={styles}
               navigation={navigation}
               onChanged={refresh}
             />
           ))}
-          {data.connection.status === "connected" && data.ompEnabled && navigation ? (
+          {data.connection.status === "connected" && navigation ? (
             <NewChatForm styles={styles} theme={theme} navigation={navigation} onCreated={refresh} />
           ) : null}
           {data.connection.status === "connected" ? (
@@ -782,9 +896,6 @@ export function HerdrOverviewScreen({ theme, layout, navigation }: PluginScreenP
                 Connected, Herdr {data.connection.version}
                 {data.connection.autoStarted ? " (auto-started by Paseo)" : ""}
               </Text>
-            ) : null}
-            {!data.ompEnabled ? (
-              <Text style={styles.muted}>OMP agents are turned off in Herdr settings, so New agent is hidden.</Text>
             ) : null}
           </View>
         </>

@@ -10,3 +10,9 @@ export const paneReadCommand = (herdrSession: string | null, paneId: string): st
 /** Argument list for `herdr [--session <name>] agent attach <target>`, for running without a shell. */
 export const attachArgs = (herdrSession: string | null, agentName: string): string[] =>
   [...(herdrSession ? ["--session", herdrSession] : []), "agent", "attach", agentName];
+/** Command a user runs in a terminal to open a pane that has no agent (`herdr terminal attach` takes the terminal id). */
+export const terminalAttachCommand = (herdrSession: string | null, terminalId: string): string =>
+  `${herdrCommand(herdrSession)} terminal attach ${shellQuote(terminalId)}`;
+/** Argument list for `herdr [--session <name>] terminal attach <terminal id>`, for running without a shell. */
+export const terminalAttachArgs = (herdrSession: string | null, terminalId: string): string[] =>
+  [...(herdrSession ? ["--session", herdrSession] : []), "terminal", "attach", terminalId];

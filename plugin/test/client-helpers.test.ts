@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { shellGateEpoch } from "../shared/settings.js";
-import { withShellSwitch, archiveDuplicatesLabel, archiveFailureMessage, companionBanner, duplicateArchiveSkippedMessage, duplicateChatsToArchive, freshDuplicatesToArchive, folderFieldValue, needsHomeExpansion, agentLabel, describeTarget, pathTail, statusLabel, statusTone, validateFolder } from "../client/helpers.js";
+import { withShellSwitch, archiveDuplicatesLabel, archiveFailureMessage, companionBanner, duplicateArchiveSkippedMessage, duplicateChatsToArchive, freshDuplicatesToArchive, folderFieldValue, needsHomeExpansion, agentLabel, describeTarget, EXISTING_AGENTS_LIMIT, paneText, pathTail, pickableAgents, placeText, plainState, statusLabel, statusTone, tabText, validateFolder, workspaceText } from "../client/helpers.js";
 
 describe("withShellSwitch", () => {
   const base = { herdrSession: "s", allowShell: false, allowShellEpoch: 0 };
@@ -162,5 +162,40 @@ describe("agentLabel", () => {
     expect(text).toContain("paseo4herdr-input.ts");
     expect(text).toContain("paseo plugin update herdr-harness");
     expect(text).not.toContain("is outdated");
+  });
+});
+
+describe("Herdr names", () => {
+  it("workspace, tab and pane use Herdr's own wording, never W/T/P codes", () => {
+    expect(workspaceText({ number: 3, label: "misc" })).toBe("misc");
+    expect(workspaceText({ number: 3, label: " " })).toBe("workspace 3");
+    expect(tabText({ number: 26, label: "codexbar" })).toBe("codexbar");
+    expect(tabText({ number: 2, label: "2" })).toBe("tab 2");
+    expect(paneText({ paneLabel: "logs", paneNumber: 1 }, 1)).toBe("logs");
+    expect(paneText({ paneLabel: null, paneNumber: 2 }, 1)).toBe("");
+    expect(paneText({ paneLabel: null, paneNumber: 2 }, 3)).toBe("pane 2");
+    expect(paneText({ paneLabel: null, paneNumber: null }, 3)).toBe("");
+    const item = { workspace: { number: 26, label: "codexbar" }, tab: { number: 1, label: "src" }, tabPanes: 2, agent: { paneLabel: null, paneNumber: 1 } };
+    expect(placeText(item, false)).toBe("codexbar › src › pane 1");
+    expect(placeText(item, true)).toBe("src › pane 1");
+  });
+  it("plainState says Shell or the program, never an agent status", () => {
+    expect(plainState({ isShell: true, program: "zsh" })).toBe("Shell");
+    expect(plainState({ isShell: false, program: "vim" })).toBe("vim");
+    expect(plainState({ isShell: false, program: null })).toBe("Terminal");
+  });
+});
+
+describe("pickableAgents", () => {
+  const entry = (id: string, extra: object = {}) => ({ agent: { id, title: id, provider: "claude", cwd: "/a", updatedAt: "2026-11-01T00:00:00Z", archivedAt: null, ...extra } });
+  it("drops archived agents, lists the newest first and filters on title, folder and provider", () => {
+    const entries = [entry("old", { updatedAt: "2026-10-01T00:00:00Z" }), entry("new", { updatedAt: "2026-11-02T00:00:00Z", cwd: "/work/api" }), entry("gone", { archivedAt: "2026-11-01" }), entry("t", { title: null, provider: "herdr-omp" })];
+    expect(pickableAgents(entries, "").map((a) => a.id)).toEqual(["new", "t", "old"]);
+    expect(pickableAgents(entries, " API ").map((a) => a.id)).toEqual(["new"]);
+    expect(pickableAgents(entries, "herdr").map((a) => [a.id, a.title])).toEqual([["t", "Untitled"]]);
+  });
+  it("cuts the list to the limit", () => {
+    const many = Array.from({ length: EXISTING_AGENTS_LIMIT + 5 }, (_, i) => entry(`a${i}`));
+    expect(pickableAgents(many, "")).toHaveLength(EXISTING_AGENTS_LIMIT);
   });
 });

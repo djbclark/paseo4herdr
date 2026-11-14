@@ -3,6 +3,7 @@ import { overviewAgentSchema } from "../shared/rpc.js";
 import { clockText, clockTextMs, cacheColdAtMs, classifyCache, cacheText, stateDurationText, tickIntervalMs } from "../client/time.js";
 import { detailLines, rowTexts } from "../client/row.js";
 import { dirLabel, sortAgents, type FlatAgent } from "../client/sort.js";
+import { agentLabel } from "../client/helpers.js";
 
 const NOW = Date.parse("2026-11-12T12:00:00Z");
 const item = (extra: object = {}, id = "t1"): FlatAgent => ({
@@ -12,7 +13,9 @@ const item = (extra: object = {}, id = "t1"): FlatAgent => ({
   }),
   workspace: { id: "w1", number: 1, label: "proj", cwd: "/a" },
   tab: { id: "tab1", number: 1, label: "one" },
+  tabPanes: 1,
 });
+const plain = (extra: object = {}, id = "sh1"): FlatAgent => item({ kind: null, harness: null, provider: null, status: "unknown", title: null, plain: true, isShell: true, program: "zsh", ...extra }, id);
 const cache = (anchorAgoSec: number) => ({ provider: "anthropic" as const, anchorAt: new Date(NOW - anchorAgoSec * 1000).toISOString(), ttlSec: 300, ttlKnown: false });
 
 describe("accessibility label", () => {
@@ -53,18 +56,54 @@ describe("sort details", () => {
 });
 
 describe("place line", () => {
-  it("keeps the pane number out of the part that gets shortened", () => {
-    const row = rowTexts(item({ cwd: "/very/long/absolute/path/to/the/project" }), "x", NOW, { compact: false, grouped: false });
-    expect(row.pin).toBe("P1");
-    expect(row.place).not.toContain("P1");
-    expect(row.place).toBe("W1 proj › T1 one · …/the/project");
-    expect(rowTexts(item({ paneNumber: null }), "x", NOW, { compact: true, grouped: true }).pin).toBe("");
+  it("uses the names a Herdr user knows, with no W/T/P codes, and shows a pane only when it is needed", () => {
+    const lone = rowTexts(item({ cwd: "/very/long/absolute/path/to/the/project" }), "x", NOW, { compact: false, grouped: false });
+    expect(lone.place).toBe("proj › one · …/the/project");
+    expect(lone.pin).toBe(""); // the only pane in its tab: nothing to tell apart
+    const shared = { ...item(), tabPanes: 2 };
+    const row = rowTexts(shared, "x", NOW, { compact: false, grouped: false });
+    expect(row.pin).toBe("pane 1");
+    expect(row.place).not.toContain("pane");
+    expect(rowTexts({ ...shared, agent: { ...shared.agent, paneNumber: null } }, "x", NOW, { compact: true, grouped: true }).pin).toBe("");
+    for (const text of [row.place, row.pin, row.speech, lone.place]) expect(text).not.toMatch(/\b[WTP]\d/);
+  });
+  it("a pane the Herdr user named shows that name, even alone in its tab", () => {
+    expect(rowTexts(item({ paneLabel: "logs" }), "x", NOW, { compact: false, grouped: true }).pin).toBe("logs");
+    expect(rowTexts(item({ paneLabel: "logs" }), "x", NOW, { compact: false, grouped: true }).speech).toContain("pane logs");
   });
   it("a tab named by its number is not repeated", () => {
     const numbered = { ...item(), tab: { id: "t", number: 1, label: "1" } };
-    expect(rowTexts(numbered, "x", NOW, { compact: false, grouped: true }).place).toBe("T1");
+    expect(rowTexts(numbered, "x", NOW, { compact: false, grouped: true }).place).toBe("tab 1");
     expect(rowTexts(numbered, "x", NOW, { compact: true, grouped: true }).place).toContain("Blocked");
-    expect(rowTexts(numbered, "x", NOW, { compact: true, grouped: true }).speech).toContain("tab 1,");
+    expect(rowTexts(numbered, "x", NOW, { compact: true, grouped: true }).speech).toMatch(/tab 1$/);
+  });
+});
+
+describe("panes with no agent", () => {
+  it("say what they run, never an agent status, and carry no time facts", () => {
+    const shell = plain();
+    const wide = rowTexts(shell, "zsh", NOW, { compact: false, grouped: true });
+    expect(wide.times).toBe("");
+    expect(wide.speech).toContain("zsh, shell");
+    expect(wide.speech).not.toMatch(/blocked|working|idle|unknown/);
+    expect(rowTexts(shell, "zsh", NOW, { compact: true, grouped: true }).place).toBe("Shell · one");
+    const program = plain({ isShell: false, program: "vim" });
+    expect(rowTexts(program, "vim", NOW, { compact: true, grouped: true }).place).toBe("vim · one");
+    expect(rowTexts(plain({ isShell: false, program: null }), "x", NOW, { compact: true, grouped: true }).place).toBe("Terminal · one");
+  });
+  it("the details sheet names the program and never invents agent facts", () => {
+    const lines = detailLines(plain(), NOW);
+    expect(lines).toContainEqual({ label: "Running", value: "zsh (shell)" });
+    expect(lines.map((line) => line.label)).toEqual(["Running", "Pane", "Terminal"]);
+  });
+  it("sort: they rank after every agent state and have no cache or time to sort on", () => {
+    const shell = plain();
+    const idle = item({ status: "idle" }, "idle");
+    expect(sortAgents([shell, idle], "status", "asc").map((x) => x.agent.terminalId)).toEqual(["idle", "sh1"]);
+    expect(sortAgents([idle, shell], "cacheCold", "asc")[1]!.agent.terminalId).toBe("sh1");
+  });
+  it("the title sort and label fall back to the program name", () => {
+    expect(agentLabel({ title: null, name: null, kind: null, terminalId: "t-1", program: "zsh" })).toBe("zsh");
   });
 });
 

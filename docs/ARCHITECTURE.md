@@ -63,7 +63,7 @@ Seam 2 is one fresh connection per request (5 s timeout; 15 s for `agent.prompt`
 | `overview.tsx` | The Herdr screen: workspace cards, agent rows, restart and more sheets, new chat and new workspace forms, connection card. Polls `herdr.overview` every 4 s. |
 | `folder-field.tsx` | Folder input with `herdr.folders.suggest` suggestions. |
 | `settings.tsx` | Settings screen and the effective-target readout. |
-| `actions.ts` | `createHerdrChat` (launch through the provider) and `bindHerdrChat` (attach to a running agent, then `herdr.chat.ready`). |
+| `actions.ts` | `createHerdrChat` (create a pane through `herdr.workspace.create` or `herdr.pane.create`, then bind; it never launches a process), `bindNewPane`, and `bindHerdrChat` (attach to a running agent or, with `allowShell`, a plain pane, then `herdr.chat.ready`). |
 | `home.ts` | The composer pill that leads back to the Herdr screen in every `herdr-*` chat. |
 | `catalog.ts` | Refreshes a provider's model list when a chat reports a model the list lacks. |
 | `decision-row.tsx` | Renders the timeline row for a decided approval or question. |
