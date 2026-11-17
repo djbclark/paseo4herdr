@@ -45,7 +45,7 @@ const shellSupport: ShellSupport = {
   interruptKeys: ["ctrl+c"],
   notice: "Prompt text runs as shell commands.",
   groupMembers: (pgid) => processGroupMembers(pgid),
-  submit: async (target, text, { signal, request, stillAllowed, allowedNow }): Promise<PromptDelivery> => {
+  submit: async (target, text, { signal, request, stillAllowed, allowedNow, clientMessageId }): Promise<PromptDelivery> => {
     const problem = shellTextProblem(text);
     if (problem) return { type: "rejected", message: problem };
     const refused = { type: "rejected", message: "Shell input was turned off or the plugin setting could not be read just now; nothing was typed." } as const;
@@ -91,7 +91,7 @@ const shellSupport: ShellSupport = {
       // The text is at the prompt and Enter may or may not have been pressed: never type or press it again.
       return { type: "uncertain", message: `The command was typed but Enter may not have been pressed (${error instanceof Error ? error.message : String(error)})` };
     }
-    recordSubmittedPrompt(request, target.terminalId, text);
+    recordSubmittedPrompt(request, target.terminalId, text, new Date(), clientMessageId);
     return { type: "accepted" };
   },
 };
@@ -119,7 +119,7 @@ export const genericAdapter: HarnessAdapter = {
    * prompt (or disconnects), it never reads the failure as "the process was replaced".
    */
   inspectInput: async ({ pid }) => ({ pid, instanceId: await processInstanceId(pid) }),
-  submitPrompt: async (target, text, { signal, request }): Promise<PromptDelivery> => {
+  submitPrompt: async (target, text, { signal, request, clientMessageId }): Promise<PromptDelivery> => {
     // Only the agent kind seen at validation counts: a reply naming another kind is not this pane's agent.
     const expectation = { terminalId: target.terminalId, sessionRef: null, accepts: (kind: string | null | undefined) => (kind ?? null) === (target.agentKind ?? null) };
     let delivery: PromptDelivery;
@@ -129,7 +129,7 @@ export const genericAdapter: HarnessAdapter = {
       // A timeout or any error not proven to precede the write is `uncertain` and is never resent.
       delivery = classifyHerdrPrompt(undefined, error, expectation);
     }
-    if (delivery.type === "accepted") recordSubmittedPrompt(request, target.terminalId, text);
+    if (delivery.type === "accepted") recordSubmittedPrompt(request, target.terminalId, text, new Date(), clientMessageId);
     return delivery;
   },
   interruptKeys: ["esc"],

@@ -22,13 +22,13 @@ export const SCREEN_SOURCE = "visible";
 /** Prompts remembered per pane; older ones drop off the front (ids keep counting up). */
 const MAX_LEDGER_ENTRIES = 50;
 
-interface LedgerEntry { n: number; text: string; at: string }
+interface LedgerEntry { n: number; text: string; at: string; clientMessageId?: string }
 
 class PromptLedger {
   readonly entries: LedgerEntry[] = [];
   private next = 1;
-  record(text: string, at: string): void {
-    this.entries.push({ n: this.next++, text, at });
+  record(text: string, at: string, clientMessageId?: string): void {
+    this.entries.push({ n: this.next++, text, at, ...(clientMessageId ? { clientMessageId } : {}) });
     if (this.entries.length > MAX_LEDGER_ENTRIES) this.entries.splice(0, this.entries.length - MAX_LEDGER_ENTRIES);
   }
 }
@@ -49,8 +49,8 @@ function ledgerFor(request: HerdrRequestFn, terminalId: string): PromptLedger {
 }
 
 /** Remember a prompt Paseo delivered to `terminalId`; shown as a `user_message` row before the screen row. */
-export function recordSubmittedPrompt(request: HerdrRequestFn, terminalId: string, text: string, now: Date = new Date()): void {
-  ledgerFor(request, terminalId).record(text, now.toISOString());
+export function recordSubmittedPrompt(request: HerdrRequestFn, terminalId: string, text: string, now: Date = new Date(), clientMessageId?: string): void {
+  ledgerFor(request, terminalId).record(text, now.toISOString(), clientMessageId);
 }
 
 export const screenRowId = (terminalId: string): string => `generic:${terminalId}:screen`;
@@ -97,7 +97,7 @@ export function openScreenReader(observation: PaneObservation): TranscriptReader
       const timestamps: Record<string, string> = {};
       for (const entry of ledgerFor(observation.request, terminalId).entries) {
         const id = promptRowId(terminalId, entry.n);
-        items.push({ id, type: "user_message", text: entry.text });
+        items.push({ id, type: "user_message", text: entry.text, ...(entry.clientMessageId ? { clientMessageId: entry.clientMessageId } : {}) });
         timestamps[id] = entry.at;
       }
       if (lastScreen) {

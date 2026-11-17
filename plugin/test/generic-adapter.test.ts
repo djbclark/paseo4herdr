@@ -241,6 +241,17 @@ describe("generic adapter in a session", () => {
     expect(count("pane.send_keys")).toBe(0); // submission is agent.prompt, never raw keystrokes
   });
 
+  it("correlates the accepted ledger echo with its optimistic user row", async () => {
+    const { session, events } = await world();
+    await session.prompt(prompt("msg_123", "same text"));
+    await session.live.reconcile();
+    await session.live.reconcile();
+    const expected = [{ id: promptRowId("t1", 1), type: "user_message", text: "same text", clientMessageId: "msg_123" }];
+    expect(timelineRows(events).filter((item) => item.type === "user_message")).toEqual(expected);
+    // Replay retains correlation independently of the pending turn's lifetime.
+    expect((await session.state.reader!.snapshot()).items.filter((item) => item.type === "user_message")).toEqual(expected);
+  });
+
   it("admits a prompt only while Herdr says idle or done", async () => {
     for (const status of ["working", "blocked", "unknown"] as const) {
       const { session, events, count } = await world({ agent: { agent_status: status } });

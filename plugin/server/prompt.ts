@@ -103,7 +103,7 @@ export class PromptController {
       const target = { pid: occupant.pid, ref, instanceId: occupant.instanceId,
         paneId: agent.pane_id, terminalId: agent.terminal_id, agentKind: agent.agent ?? null,
         pane: { paneId: agent.pane_id, terminalId: agent.terminal_id, process: processInfo } };
-      const ctx = { signal: session.signal, request: session.deps.request, stillAllowed: () => session.shellStillAllowed(generation), allowedNow: () => session.shellAllowedNow(generation) };
+      const ctx = { clientMessageId: prompt.clientMessageId, signal: session.signal, request: session.deps.request, stillAllowed: () => session.shellStillAllowed(generation), allowedNow: () => session.shellAllowedNow(generation) };
       // A shell occupant is typed into as a command line; every other occupant goes through the adapter's own submit.
       const shell = occupant.shell ? session.adapter.shell : undefined;
       if (occupant.shell && !shell) throw new Error("This adapter cannot type into a shell");

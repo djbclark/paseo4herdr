@@ -176,6 +176,8 @@ export interface ShellSupport {
    * and the prompt is never resent.
    */
   submit(target: InputTarget & { instanceId: string; paneId: string; terminalId: string }, text: string, ctx: {
+    /** Correlates an accepted prompt echo with the Paseo optimistic user row. */
+    clientMessageId?: string;
     signal: AbortSignal;
     request(method: string, params?: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<unknown>;
     /** Async check: shell input is still allowed (kill switch, a fresh read of the plugin setting and its enable epoch, session generation). */
@@ -221,6 +223,8 @@ export interface HarnessAdapter {
   /** Process-local input endpoint; identity survives pane moves, not process replacement. */
   inspectInput(target: InputTarget, signal?: AbortSignal): Promise<{ pid: number; instanceId: string }>;
   submitPrompt(target: InputTarget & { instanceId: string; paneId: string; terminalId: string }, text: string, ctx: {
+    /** Correlates an accepted prompt echo with the Paseo optimistic user row. */
+    clientMessageId?: string;
     signal: AbortSignal;
     request(method: string, params?: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<unknown>;
   }): Promise<PromptDelivery>;

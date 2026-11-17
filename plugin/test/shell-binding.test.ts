@@ -94,6 +94,15 @@ const promptResults = (events: ProviderEvent[]) => events.flatMap((e) => e.type 
 const turnStates = (events: ProviderEvent[]) => events.flatMap((e) => e.type === "session.turn" ? [e.state] : []);
 
 describe("shell opt-in: the flag", () => {
+  it("correlates an accepted shell command echo with the Paseo user row", async () => {
+    const { session, events } = await world({ allowShell: true });
+    await session.prompt(prompt("msg_shell", "printf ok"));
+    await session.live.reconcile();
+    expect(events.flatMap((event) => event.type === "timeline.item" && event.item.type === "user_message" ? [event.item] : [])).toEqual([
+      { id: "generic:t1:user:1", type: "user_message", text: "printf ok", clientMessageId: "msg_shell" },
+    ]);
+  });
+
   it("without the flag a shell pane behaves as before: not listed, frozen at open, nothing is ever typed", async () => {
     const { session, listCalls, writes, events } = await world({ allowShell: false });
     expect(session.state.outcome).toBe("readonly");
