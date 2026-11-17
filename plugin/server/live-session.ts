@@ -12,6 +12,14 @@ const NOTIFY_MIN_INTERVAL_MS = 250;
 /** Scheduling only: binding, turn, connectivity and transcript state live in SessionState. */
 export class LiveSession {
   private running = false;
+  /** At most one outstanding final screen; retries require a fresh read and never replay partial output. */
+  private screenTurn: string | null = null;
+
+  observeTurn(turnId: string, state: string): void {
+    if (state === "started") this.screenTurn = null;
+    else if (state === "completed" || state === "failed" || state === "canceled") this.screenTurn = turnId;
+  }
+
   private timer: NodeJS.Timeout | undefined;
   private readerUnsubscribe: (() => void) | null = null;
   private streamController: AbortController | null = null;
@@ -283,7 +291,16 @@ export class LiveSession {
       state.tracker.observeStatus("working");
       state.tracker.observeStatus(state.status);
     }
-    const rows = diffTimeline(snapshot, state.timeline, state.binding.submittedMessages);
+    const sampledScreen = snapshot.screen;
+    const rows = diffTimeline(snapshot, state.timeline, state.binding.submittedMessages)
+      .filter((row) => row.item.id !== sampledScreen?.itemId);
+    if (sampledScreen?.fresh && this.screenTurn && !state.tracker.activeTurn) {
+      const screen = snapshot.items.find((item) => item.id === sampledScreen.itemId);
+      if (screen) {
+        rows.push({ item: { ...screen, id: `${screen.id}:turn:${this.screenTurn}` }, timestamp: snapshot.timestamps[screen.id] });
+        this.screenTurn = null;
+      }
+    }
     const nextTimeline = new Map(state.timeline);
     const rawById = new Map(snapshot.items.map((item) => [item.id, item]));
     for (const row of rows) {

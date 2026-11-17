@@ -697,6 +697,7 @@ export class HerdrHarnessSession {
 
   private applyEffect(effect: TurnEffect): void {
     if (effect.type === "turn") {
+      this.live.observeTurn(effect.turnId, effect.state);
       this.emit({ type: "session.turn", sessionId: this.sessionId, turnId: effect.turnId, state: effect.state,
         ...(effect.error ? { error: { message: effect.error } } : {}) });
     } else if (effect.type === "prompt_failed") {

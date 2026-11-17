@@ -3,14 +3,9 @@ import { PaneReadResultSchema } from "../../herdr/schema.js";
 import type { HerdrRequestFn, PaneObservation, TranscriptReader, TranscriptSnapshot } from "../types.js";
 
 /**
- * Generic (pane-bound) timeline: the pane's screen is not an append-only transcript, so it is shown as ONE mutable row
- * with a fixed id, preceded by an in-memory ledger of the prompts Paseo sent to this pane.
- *
- * Invariants the core relies on:
- * - the screen row id never changes, so a changed screen re-emits the same id (the core diffs by id + content hash);
- * - `extendsPrevious` is always true and `chainIds` is empty, so a rewritten screen never reads as a "branched" freeze;
- * - `snapshot()` never throws: a throw from a reader is a disconnect for the live loop, and an unreadable screen is not
- *   a disconnected pane.
+ * A pane screen is a sample, not an append-only transcript. Initial replay may show one sample; the live loop
+ * publishes one fresh sample per observed turn end with a distinct id. Paseo appends events; repeating a fixed id
+ * does not replace its earlier row. Prompt rows are an in-memory ledger, separate from screen sampling.
  */
 
 /**
@@ -106,6 +101,7 @@ export function openScreenReader(observation: PaneObservation): TranscriptReader
         timestamps[id] = lastScreen.at;
       }
       return {
+        screen: { itemId: screenRowId(terminalId), fresh: text !== null },
         items,
         timestamps,
         ...(lastScreen ? { updatedAt: lastScreen.at } : {}),

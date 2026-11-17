@@ -232,6 +232,41 @@ const turnStates = (events: ProviderEvent[]) => events.flatMap((e) => e.type ===
 const timelineRows = (events: ProviderEvent[]) => events.flatMap((e) => e.type === "timeline.item" ? [e.item] : []);
 
 describe("generic adapter in a session", () => {
+  it.each(["completed", "canceled", "failed"])("samples once for a %s end and retries failed reads", async (end) => {
+    const { session, state, events } = await world();
+    const screens = () => timelineRows(events).filter((item) => item.type === "assistant_message");
+    for (let n = 0; n < 20; n++) {
+      state.screen = `partial ${n}`;
+      await session.live.readTranscript();
+    }
+    expect(screens()).toEqual([]);
+    session.live.observeTurn("one", end);
+    state.screen = new Error("unavailable");
+    await session.live.readTranscript();
+    expect(screens()).toEqual([]);
+    state.screen = "final";
+    await session.live.readTranscript();
+    expect(screens()).toEqual([{ id: "generic:t1:screen:turn:one", type: "assistant_message", text: "```\nfinal\n```" }]);
+    state.screen = "idle repaint";
+    await session.live.readTranscript();
+    expect(screens()).toHaveLength(1);
+    session.live.observeTurn("two", end);
+    await session.live.readTranscript();
+    expect(screens()).toHaveLength(2);
+    expect(screens()[1]?.id).toBe("generic:t1:screen:turn:two");
+  });
+
+  it("drops an unread final sample when another turn starts", async () => {
+    const { session, state, events } = await world();
+    session.live.observeTurn("old", "completed");
+    state.screen = new Error("unavailable");
+    await session.live.readTranscript();
+    session.live.observeTurn("new", "started");
+    state.screen = "partial";
+    await session.live.readTranscript();
+    expect(timelineRows(events).filter((item) => item.type === "assistant_message")).toEqual([]);
+  });
+
   it("opens an idle agent on the screen row and takes a prompt through agent.prompt", async () => {
     const { session, events, log, count } = await world();
     expect(session.state.outcome).toBe("active");
@@ -352,6 +387,7 @@ describe("generic adapter in a session", () => {
       expect(turnStates(events)).toEqual(["started"]);
       await vi.advanceTimersByTimeAsync(3_100);
       expect(turnStates(events)).toEqual(["started", "completed"]);
+      expect(timelineRows(events).filter((item) => item.type === "assistant_message")).toHaveLength(1);
     } finally { vi.useRealTimers(); }
   });
 
@@ -389,15 +425,14 @@ describe("generic adapter in a session", () => {
     expect(log.find((entry) => entry.method === "pane.send_keys")?.params).toEqual({ pane_id: "pane-1", keys: ["ctrl+c"] });
   });
 
-  it("emits the screen row under one id as the screen changes, and survives a total rewrite", async () => {
+  it("keeps idle screen rewrites internal instead of appending rows", async () => {
     const { session, state, events } = await world();
     state.screen = "line one";
     await session.live.reconcile();
     state.screen = "nothing like before";
     await session.live.reconcile();
     const screens = timelineRows(events).filter((item) => item.id === screenRowId("t1"));
-    expect(screens.map((item) => item.type === "assistant_message" ? item.text : "")).toEqual([
-      "```\nline one\n```", "```\nnothing like before\n```"]);
+    expect(screens).toEqual([]);
     expect(session.state.outcome).toBe("active"); // a rewritten screen never reads as a branch
   });
 

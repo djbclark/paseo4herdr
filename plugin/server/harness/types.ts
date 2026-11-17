@@ -39,6 +39,8 @@ export interface TranscriptLocator {
   pane?: PaneObservation;
 }
 export interface TranscriptSnapshot {
+  /** A sampled pane screen: live rows are emitted once per observed turn end, never as mutable upserts. */
+  screen?: { itemId: string; fresh: boolean };
   items: ProviderTimelineItem[];
   timestamps: Readonly<Record<string, string>>;
   title?: string;

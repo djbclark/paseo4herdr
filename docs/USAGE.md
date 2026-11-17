@@ -202,3 +202,18 @@ By default a plain shell pane is refused. A conversation can be opted into **she
 - Only agents Herdr lists as agents are supported. OMP has full support; any other detected agent opens as a "Generic" chat: you see the pane's screen as one updating message, prompts you send appear above it, and approvals, model changes, restart and forks are not available. Plain shell panes are listed, but a chat can type into one only if you opt a conversation into shell input (next section).
 - Only plain-text messages can be sent from Paseo.
 - If an agent disappears from Herdr, its chat goes read-only; a new chat is needed for any agent that replaces it.
+
+### Generic screen samples
+
+A Generic or shell chat shows sampled visible pane output, not a native transcript or a streaming terminal.
+Initial history replay can show one screen sample. While the chat is open, screen repaints do not add rows:
+Herdr's observed turn end publishes at most one fresh screen sample, under a distinct row id. Completed,
+canceled and failed turns use the same rule, including turns started in the terminal and observed by Herdr.
+The sample is read after the end is observed; it is not an exact capture at the instant a command exited.
+
+If the screen cannot be read at turn end, the plugin retries on later reconciles while idle. It does not
+publish the last cached partial screen as final output. Starting another observed turn discards that pending
+sample. Disconnects, reconnects and idle repaints alone add no sample. A turn that ends while disconnected
+can only produce a sample if the turn tracker recognizes its end after reconnecting. Freezing or closing a
+chat stops reads; it does not manufacture a final screen. Reopening starts a new sampling lifetime; existing
+Paseo history is not rewritten or deduplicated. Open the terminal for continuous output or an unobserved turn.
