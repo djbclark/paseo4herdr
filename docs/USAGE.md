@@ -199,7 +199,7 @@ By default a plain shell pane is refused. A conversation can be opted into **she
 ## Known limits
 
 - Replies appear a message at a time, not token by token.
-- Only agents Herdr lists as agents are supported. OMP has full support; any other detected agent opens as a "Generic" chat: you see the pane's screen as one updating message, prompts you send appear above it, and approvals, model changes, restart and forks are not available. Plain shell panes are listed, but a chat can type into one only if you opt a conversation into shell input (next section).
+- Only agents Herdr lists as agents are supported. OMP has full support; any other detected agent opens as a "Generic" chat: history replay can show an initial pane-screen sample, followed by at most one fresh sample per observed turn end and the prompts you send, and approvals, model changes, restart and forks are not available. Plain shell panes are listed, but a chat can type into one only if you opt a conversation into shell input (next section).
 - Only plain-text messages can be sent from Paseo.
 - If an agent disappears from Herdr, its chat goes read-only; a new chat is needed for any agent that replaces it.
 
