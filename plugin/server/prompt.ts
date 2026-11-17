@@ -50,7 +50,14 @@ export class PromptController {
     if (session.isAborted) return;
     const fail = (message: string) => session.emit({ type: "session.prompt_result", sessionId: session.sessionId,
       clientMessageId: prompt.clientMessageId, result: { type: "failed", error: { message } } });
-    if (state.outcome !== "active") return fail("This conversation is read-only; import the current native session separately to continue");
+    if (state.outcome !== "active") {
+      const shell = state.binding.occupant?.shell || state.binding.allowShell;
+      return fail(shell
+        ? "This shell conversation is read-only. Check the pane in the terminal, then open a new shell chat from the Herdr screen with shell input enabled."
+        : session.adapter.binding === "pane"
+          ? "This pane conversation is read-only. Open the current agent from the Herdr screen to continue in a new chat."
+          : "This conversation is read-only; import the current native session separately to continue");
+    }
     if (!state.connected) return fail("Input is suspended until Herdr and the bound native session are reconciled");
     if (state.admitting || state.tracker.activeTurn) return fail("Agent is already working");
     if (prompt.delivery !== "auto" || prompt.input.type !== "message" || prompt.input.content.some((part) => part.type !== "text")) {
