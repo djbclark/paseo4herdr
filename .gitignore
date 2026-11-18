@@ -1,0 +1,5 @@
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
+
+# session handoff records are local scratch, not repo content
+docs/handoffs/
